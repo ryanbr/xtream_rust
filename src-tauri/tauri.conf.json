@@ -1,5 +1,4 @@
 {
-  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "xtream",
   "version": "0.1.0",
   "identifier": "com.infinitel8p.xtream",
@@ -31,6 +30,7 @@
     "active": true,
     "targets": "all",
     "publisher": "InfiniteL8p",
+    "category": "public.app-category.video",
     "copyright": "© 2025 Ludovico Ferrara",
     "icon": [
       "icons/32x32.png",
