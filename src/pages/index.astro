@@ -58,21 +58,25 @@ import "../styles/global.css";
 						class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-6">
 						<input
 							id="host"
+							autocomplete="off"
 							placeholder="https://panel.example.com"
 							class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
 						/>
 						<input
 							id="port"
+							autocomplete="off"
 							placeholder="8080"
 							class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
 						/>
 						<input
 							id="user"
+							autocomplete="off"
 							placeholder="username"
 							class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
 						/>
 						<input
 							id="pass"
+							autocomplete="off"
 							placeholder="password"
 							type="password"
 							class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-900"
@@ -397,16 +401,44 @@ import "../styles/global.css";
 			};
 			searchEl.addEventListener("input", debounce(applyFilter, 160));
 
+			function buildTarget(host, port, user, pass) {
+				// Ensure scheme
+				const baseHost = /^https?:\/\//i.test(host)
+					? host
+					: `http://${host}`;
+				// Put the API path here
+				const apiUrl = new URL(
+					"/player_api.php",
+					baseHost.replace(/\/+$/, "") +
+						(port && !/:\d+$/.test(baseHost) ? `:${port}` : "")
+				);
+				apiUrl.search = new URLSearchParams({
+					username: user,
+					password: pass,
+					action: "get_live_streams",
+				}).toString();
+				return apiUrl.toString();
+			}
+
 			async function loadChannels() {
 				listStatus.textContent = "Loading channels…";
 				spacer.style.height = "0px";
 				viewport.innerHTML = "";
 				try {
-					const { host, port, user, pass } = getCreds();
-					const api = `${fmtBase(host, port)}/player_api.php?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}&action=get_live_streams`;
-					const r = await fetch(api); // may CORS-fail depending on panel
-					if (!r.ok) throw new Error("API " + r.status);
-					const data = await r.json();
+					const target = buildTarget(
+						host.value,
+						port.value,
+						user.value,
+						pass.value
+					);
+					const api = `/api/proxy?url=${encodeURIComponent(target)}`;
+					const r = await fetch(api);
+					const body = await r.text();
+					if (!r.ok) {
+						console.error("Upstream error body:", body);
+						throw new Error(`API ${r.status}: ${body}`);
+					}
+					const data = JSON.parse(body);
 					const arr = Array.isArray(data)
 						? data
 						: data?.streams || data?.results || [];
