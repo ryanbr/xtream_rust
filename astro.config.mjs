@@ -7,6 +7,8 @@ import tailwindcss from '@tailwindcss/vite';
 
 // https://astro.build/config
 export default defineConfig({
+  site: 'https://dev.infinitel8p.com',
+  base: '/xtream/',
   vite: {
     plugins: [tailwindcss()]
   },
