@@ -48,8 +48,9 @@ import Layout from "@/layouts/Layout.astro";
 							class="text-lg font-semibold tracking-tight md:text-lg">
 							xtream Video Player
 						</h1>
-						<p class="text-xs text-gray-400">
-							Sign in, load channels, and start watching.
+						<p class="text-xs text-gray-400 text-wrap max-w-xs">
+							Sign in with Xtream Codes credentials <em>or</em> load
+							channels directly from an M3U/M3U8 playlist.
 						</p>
 					</div>
 				</div>
@@ -89,23 +90,23 @@ import Layout from "@/layouts/Layout.astro";
 								<input
 									id="host"
 									class="h-9 rounded-xl border border-white/10 bg-white/5 px-3 text-sm text-white placeholder:text-gray-400 outline-none focus:border-indigo-400/30 focus:bg-white/10 focus:ring-2 focus:ring-indigo-500/40"
-									placeholder="https://example.com"
+									placeholder="Xtream host or M3U/M3U8 URL"
 								/>
 								<input
 									id="port"
 									class="h-9 rounded-xl border border-white/10 bg-white/5 px-3 text-sm text-white placeholder:text-gray-400 outline-none focus:border-indigo-400/30 focus:bg-white/10 focus:ring-2 focus:ring-indigo-500/40"
-									placeholder="8080"
+									placeholder="port (leave empty for M3U)"
 								/>
 								<input
 									id="user"
 									class="h-9 rounded-xl border border-white/10 bg-white/5 px-3 text-sm text-white placeholder:text-gray-400 outline-none focus:border-indigo-400/30 focus:bg-white/10 focus:ring-2 focus:ring-indigo-500/40"
-									placeholder="username"
+									placeholder="username (leave empty for M3U)"
 								/>
 								<input
 									id="pass"
 									type="password"
 									class="h-9 rounded-xl border border-white/10 bg-white/5 px-3 text-sm text-white placeholder:text-gray-400 outline-none focus:border-indigo-400/30 focus:bg-white/10 focus:ring-2 focus:ring-indigo-500/40"
-									placeholder="password"
+									placeholder="password (leave empty for M3U)"
 								/>
 								<button
 									id="saveBtn"
@@ -120,6 +121,37 @@ import Layout from "@/layouts/Layout.astro";
 									>Load Channels</button
 								>
 							</form>
+							<div
+								class="mt-8 text-xs text-gray-400 leading-relaxed max-w-3xl">
+								<p>
+									<strong>Disclaimer:</strong> This app does <em
+										>not</em
+									> provide any content. You can either:
+								</p>
+								<ul
+									class="list-disc list-inside mt-1 space-y-1">
+									<li>
+										Log in with any Xtream Codes–compatible
+										IPTV subscription (not included), or
+									</li>
+									<li>
+										Paste a valid <code>.m3u</code>/<code
+											>.m3u8</code
+										> playlist URL into the <em>Host</em> field
+										(leave username/password empty).
+									</li>
+								</ul>
+								<p class="mt-3">
+									We are <em>not responsible</em> for the accuracy
+									of login credentials, the uptime of IPTV providers,
+									or whether individual streams work. Free, publicly
+									available test playlists can be found at
+									<span class="text-indigo-400"
+										>iptv-org.github.io/iptv</span
+									>. Please note: not every stream may work,
+									and availability can change at any time.
+								</p>
+							</div>
 						</div>
 					</div>
 				</details>
@@ -244,7 +276,10 @@ import Layout from "@/layouts/Layout.astro";
 						<div
 							id="list-status"
 							class="mt-2 px-2.5 text-sm text-gray-400">
-							Enter credentials and click “Load Channels”.
+							Enter Xtream Codes credentials and click “Load
+							Channels”, <br />
+							or paste an M3U/M3U8 playlist URL in the Host field (leave
+							user/pass empty).
 						</div>
 					</div>
 				</aside>

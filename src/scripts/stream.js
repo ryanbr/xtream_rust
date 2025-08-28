@@ -139,6 +139,79 @@ function buildApiUrl(action, params = {}) {
 }
 
 // ----------------------------
+// M3U support
+// ----------------------------
+let directUrlById = new Map(); // id -> direct HLS/stream URL
+let usingM3U = false;
+
+function isLikelyM3USource(host, user, pass) {
+	// Treat as M3U when host is an absolute http(s) URL ending with .m3u/.m3u8
+	// and no Xtream credentials are supplied.
+	try {
+		const u = new URL(host);
+		const ext = (u.pathname || "").toLowerCase();
+		const isM3U = ext.endsWith(".m3u") || ext.endsWith(".m3u8");
+		return /^https?:$/.test(u.protocol) && isM3U && (!user && !pass);
+	} catch {
+		return false;
+	}
+}
+
+// tiny EXTINF parser (enough for iptv-org style)
+function parseM3U(text) {
+	/** @type {Array<{ id:number, name:string, category?:string, logo?:string|null, url:string }>} */
+	const out = [];
+	const lines = text.split(/\r?\n/);
+	let pending = null;
+
+	const readAttr = (s, key) => s.match(new RegExp(`${key}="([^"]*)"`, "i"))?.[1] || "";
+
+	let idSeq = 1;
+	for (const line of lines) {
+		if (line.startsWith("#EXTINF")) {
+			const name = line.split(",").pop()?.trim() || `Channel ${idSeq}`;
+			const logo = readAttr(line, "tvg-logo");
+			const group = readAttr(line, "group-title") || "Uncategorized";
+			pending = { name, logo, category: group };
+		} else if (pending && line && !line.startsWith("#")) {
+			const url = safeHttpUrl(line.trim());
+			if (url) {
+				out.push({
+					id: idSeq++,
+					name: pending.name,
+					category: pending.category,
+					logo: pending.logo || null,
+					norm: normalize(`${pending.name} ${pending.category}`),
+					url,
+				});
+			}
+			pending = null;
+		}
+	}
+	return out;
+}
+
+function resetDirectMap() {
+	directUrlById = new Map();
+}
+
+function indexDirectUrls(items) {
+	resetDirectMap();
+	for (const ch of items) {
+		if (ch.url) directUrlById.set(ch.id, ch.url);
+	}
+}
+
+function hasDirectUrl(id) {
+	return directUrlById.has(id);
+}
+
+function getDirectUrl(id) {
+	return directUrlById.get(id) || "";
+}
+
+
+// ----------------------------
 // UI refs
 // ----------------------------
 const listEl = document.getElementById('list')
@@ -192,7 +265,7 @@ saveBtn.addEventListener('click', async (e) => {
 		user: userEl.value.trim(),
 		pass: passEl.value.trim(),
 	})
-	listStatus.textContent = 'Saved. Click “Load Channels”.'
+	listStatus.textContent = 'Saved. Tip: paste an M3U/M3U8 URL into the Host field (leave user/pass empty) to load a playlist. Then click “Load Channels”.';
 })
 	;['host', 'port', 'user', 'pass'].forEach((id) => {
 		$(id).addEventListener('keydown', (e) => {
@@ -464,34 +537,54 @@ clearCatBtn?.addEventListener('click', () => {
 })
 
 async function loadChannels() {
-	creds = await loadCreds()
-	listStatus.textContent = 'Loading channels…'
-	spacer.style.height = '0px'
-	viewport.innerHTML = ''
+	creds = await loadCreds();
+	listStatus.textContent = 'Loading channels…';
+	spacer.style.height = '0px';
+	viewport.innerHTML = '';
+	usingM3U = isLikelyM3USource(creds.host, creds.user, creds.pass);
+
 	try {
-		const catMap = await ensureCategoryMap()
-		const r = await xfetch(buildApiUrl('get_live_streams'))
-		const body = await r.text()
-		if (!r.ok) {
-			console.error('Upstream error body:', body)
-			throw new Error(`API ${r.status}: ${body}`)
+		if (usingM3U) {
+			// --- M3U MODE ---
+			const r = await xfetch(creds.host);
+			if (!r.ok) throw new Error(`M3U ${r.status}: ${await r.text()}`);
+			const text = await r.text();
+			const items = parseM3U(text);
+
+			all = items
+				.filter((x) => x.url && x.name)
+				.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
+
+			indexDirectUrls(all);       // enable direct playback
+			categoryMap = null;         // not used in M3U mode
+
+			listStatus.textContent = `${all.length.toLocaleString()} channels (M3U)`;
+			renderCategoryPicker(all);
+			mountVirtualList(all);
+			return;
 		}
-		const data = JSON.parse(body)
-		const arr = Array.isArray(data) ? data : data?.streams || data?.results || []
+
+		// --- XTREAM MODE (original path) ---
+		const catMap = await ensureCategoryMap();
+		const r = await xfetch(buildApiUrl('get_live_streams'));
+		const body = await r.text();
+		if (!r.ok) {
+			console.error('Upstream error body:', body);
+			throw new Error(`API ${r.status}: ${body}`);
+		}
+		const data = JSON.parse(body);
+		const arr = Array.isArray(data) ? data : data?.streams || data?.results || [];
 		all = (arr || [])
 			.map((ch) => {
-				const name = String(ch.name || '')
+				const name = String(ch.name || '');
 				const ids =
 					(Array.isArray(ch.category_ids) && ch.category_ids.length && ch.category_ids) ||
-					(ch.category_id != null ? [ch.category_id] : [])
-				let category = String(ch.category_name || '').trim()
+					(ch.category_id != null ? [ch.category_id] : []);
+				let category = String(ch.category_name || '').trim();
 				if (!category && ids.length && catMap && catMap.size) {
 					for (const id of ids) {
-						const n = catMap.get(String(id))
-						if (n) {
-							category = n
-							break
-						}
+						const n = catMap.get(String(id));
+						if (n) { category = n; break; }
 					}
 				}
 				return {
@@ -500,20 +593,22 @@ async function loadChannels() {
 					category,
 					logo: ch.stream_icon || null,
 					norm: normalize(name + ' ' + category),
-				}
+				};
 			})
 			.filter((x) => x.id && x.name)
-			.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }))
+			.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
 
-		listStatus.textContent = `${all.length.toLocaleString()} channels`
-		renderCategoryPicker(all)
-		mountVirtualList(all)
+		resetDirectMap(); // ensure we're not in direct-url mode
+		listStatus.textContent = `${all.length.toLocaleString()} channels`;
+		renderCategoryPicker(all);
+		mountVirtualList(all);
 	} catch (e) {
-		console.error(e)
-		listStatus.innerHTML = '<p>Failed to load channels. Make sure you have entered valid credentials to a IPTV service.<br/><br/>We do not provide any streams or content ourselves.</p>'
-		mountVirtualList([]) // clears list
+		console.error(e);
+		listStatus.innerHTML = '<p>Failed to load channels. Make sure you entered a valid Xtream service <em>or</em> an accessible M3U/M3U8 URL in the Host field.<br/><br/>We do not provide any streams or content ourselves.</p>';
+		mountVirtualList([]); // clears list
 	}
 }
+
 
 fetchBtn.addEventListener('click', () => {
 	loadChannels()
@@ -552,51 +647,55 @@ const ensurePlayer = () => {
 }
 
 function play(streamId, name) {
-	const src = buildDirectM3U8(streamId)
+	const src = hasDirectUrl(streamId) ? getDirectUrl(streamId) : buildDirectM3U8(streamId);
 
 	currentEl.innerHTML = `
     <div class="flex items-center gap-2 max-w-[calc(100%-4rem)]">
       <span class="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-600 text-[10px] font-bold text-white ring-1 ring-white/10">ON</span>
       <span class="truncate w-full">Now playing: ${name}</span>
-    </div>`
+    </div>`;
 
-	const videoEl = document.getElementById('player')
-	videoEl.removeAttribute('hidden')
-	const player = ensurePlayer()
+	const videoEl = document.getElementById('player');
+	videoEl.removeAttribute('hidden');
+	const player = ensurePlayer();
 
-	player.src({ src, type: 'application/x-mpegURL' })
-	player.play().catch(() => { })
-	loadEPG(streamId)
+	player.src({ src, type: 'application/x-mpegURL' });
+	player.play().catch(() => { });
+
+	// EPG is only available via Xtream
+	if (hasDirectUrl(streamId)) {
+		epgList.innerHTML = `<div class="text-gray-500">No EPG available for M3U source.</div>`;
+	} else {
+		loadEPG(streamId);
+	}
 
 	// ensure only one PiP button
-	const oldBtn = document.getElementById('pip-btn')
-	if (oldBtn) oldBtn.remove()
+	const oldBtn = document.getElementById('pip-btn');
+	if (oldBtn) oldBtn.remove();
 
-	const btn = document.createElement('button')
-	btn.id = 'pip-btn'
-	btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" class="icon icon-tabler icons-tabler-filled icon-tabler-picture-in-picture"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M19 4a3 3 0 0 1 3 3v4a1 1 0 0 1 -2 0v-4a1 1 0 0 0 -1 -1h-14a1 1 0 0 0 -1 1v10a1 1 0 0 0 1 1h6a1 1 0 0 1 0 2h-6a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z" /><path d="M20 13a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-5a2 2 0 0 1 -2 -2v-3a2 2 0 0 1 2 -2z" /></svg>`
-	btn.className = 'h-9 px-3 rounded-xl border border-white/10 bg-white/5 text-sm'
-	document.getElementById('current').appendChild(btn)
+	const btn = document.createElement('button');
+	btn.id = 'pip-btn';
+	btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" class="icon icon-tabler icons-tabler-filled icon-tabler-picture-in-picture"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M19 4a3 3 0 0 1 3 3v4a1 1 0 0 1 -2 0v-4a1 1 0 0 0 -1 -1h-14a 1 1 0 0 0 -1 1v10a1 1 0 0 0 1 1h6a1 1 0 0 1 0 2h-6a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z" /><path d="M20 13a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-5a2 2 0 0 1 -2 -2v-3a2 2 0 0 1 2 -2z" /></svg>`;
+	btn.className = 'h-9 px-3 rounded-xl border border-white/10 bg-white/5 text-sm';
+	document.getElementById('current').appendChild(btn);
 	btn.addEventListener('click', async () => {
-		// Prefer native PiP via our bridge
 		if (window.AndroidPip?.toggle) {
-			window.AndroidPip.toggle()
-			return
+			window.AndroidPip.toggle();
+			return;
 		}
-		// Fallback: web PiP (works on desktop/browser)
-		const el = player.el().querySelector('video')
+		const el = player.el().querySelector('video');
 		if (document.pictureInPictureEnabled && !el.disablePictureInPicture) {
 			try {
-				if (document.pictureInPictureElement === el) {
-					await document.exitPictureInPicture()
-				} else {
-					if (el.readyState < 2) await el.play().catch(() => { })
-					await el.requestPictureInPicture()
+				if (document.pictureInPictureElement === el) await document.exitPictureInPicture();
+				else {
+					if (el.readyState < 2) await el.play().catch(() => { });
+					await el.requestPictureInPicture();
 				}
 			} catch { }
 		}
-	})
+	});
 }
+
 
 // ----------------------------
 // EPG (auto base64 decode if needed)

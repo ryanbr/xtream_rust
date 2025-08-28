@@ -1,11 +1,11 @@
 {
-  "version": "0.3.2",
-  "notes": "Release 0.3.2",
-  "pub_date": "2025-08-27T10:07:38.685Z",
+  "version": "0.3.3",
+  "notes": "Release 0.3.3",
+  "pub_date": "2025-08-28T08:59:45.914Z",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/infinitel8p/xtream/releases/download/v0.3.2/xtream_0.3.2_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa2JUVEh6cTFOcHVIT1pCcGlGYTA2UVVNbkRhbDR1NFVqSU9NMFNxV1ZLN1EvRXByRkZiU0U0cU91ZWJiWGFEQnorRWk3WVVxYVF2OGJkN1VhR0VIOEx1RkJYTmdITXc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzU2Mjg5MjUwCWZpbGU6eHRyZWFtXzAuMy4yX3g2NC1zZXR1cC5leGUKQ3JJaWtGVjQ0aDl6UTIyaUV1UmVBNmw1NStFaUpnQUFia0ZtMEVFZ1VIVDRBSUdIOWx1WTVKdnphMHlqSU5wTEF0SDgydlBDYlpZamxIdDNQc3ZEQnc9PQo="
+      "url": "https://github.com/infinitel8p/xtream/releases/download/v0.3.3/xtream_0.3.3_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa2JUVEh6cTFOcHJ4aERsMzU0MFZZK2pSc2tZeXBicktCZmVKd2FHZlB3SVh1WStSS1hNZHVmZzdOYktmcVo2bmpaWEdJOGVWZEtRSVhtTEFrWWdMNkVOa0o4ejRlTkFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzU2MzcxNDUxCWZpbGU6eHRyZWFtXzAuMy4zX3g2NC1zZXR1cC5leGUKWXV3R2hFc2JOMy9MOEtPeGlRNkRpSlU4YXRBWkhqcE9rN3BYZCtkU283aEJuUjM1bW0rd3hRWmN4OWI1ckU0ZkZZUzNVWm4wTEppRGlyZ3VLaThlQ0E9PQo="
     }
   }
 }
