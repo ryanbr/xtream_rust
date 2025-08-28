@@ -510,7 +510,7 @@ async function loadChannels() {
 		mountVirtualList(all)
 	} catch (e) {
 		console.error(e)
-		listStatus.textContent = 'Failed to load channels. You can still play if you know a stream id.'
+		listStatus.innerHTML = '<p>Failed to load channels. Make sure you have entered valid credentials to a IPTV service.<br/><br/>We do not provide any streams or content ourselves.</p>'
 		mountVirtualList([]) // clears list
 	}
 }
