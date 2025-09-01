@@ -2,7 +2,7 @@
   <img src="https://raw.githubusercontent.com/infinitel8p/xtream/refs/heads/main/src-tauri/icons/128x128@2x.png" alt="App Icon"/>
 </p>
 
-# Xtream IPTV Player – Live TV
+# Extreme InfiniTV - Live and IPTV
 
 
 <div style="display: flex; justify-content: center; align-items: center; gap: 10px;">
