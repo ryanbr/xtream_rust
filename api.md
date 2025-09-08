@@ -7,6 +7,47 @@
 
 ---
 
+## User/Server Info
+
+**Request**
+```
+<url>/player_api.php?username=<user>&password=<pwd>
+```
+
+**Example Response**
+```json
+{
+  "user_info": {
+    "username": "<user>",
+    "password": "<pwd>",
+    "message": "",
+    "auth": 1,
+    "status": "Active",
+    "exp_date": "1758143248",
+    "is_trial": "0",
+    "active_cons": "0",
+    "created_at": "1755551248",
+    "max_connections": "1",
+    "allowed_output_formats": [
+      "m3u8",
+      "ts"
+    ]
+  },
+  "server_info": {
+    "url": "<url>",
+    "port": "80",
+    "https_port": "",
+    "server_protocol": "http",
+    "rtmp_port": "8001",
+    "timezone": "Africa/Casablanca",
+    "timestamp_now": 1756823649,
+    "time_now": "2025-09-02 15:34:09",
+    "process": true
+  }
+}
+```
+
+
 ## Get Whole Streams M3U (get.php)
 
 **Request**  
