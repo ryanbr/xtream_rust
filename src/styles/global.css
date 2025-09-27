@@ -3,6 +3,12 @@
 
 @theme {
     --color-dark: #0b0820;
+
+    --breakpoint-sm: 40em;      /* 640px */
+    --breakpoint-md: 48em;      /* 768px */
+    --breakpoint-lg: 64em;      /* 1024px */
+    --breakpoint-xl: 80em;      /* 1280px */
+    --breakpoint-2xl: 96em;     /* 1536px */
 }
 
 :root,
