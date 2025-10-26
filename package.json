@@ -12,18 +12,18 @@
     "tauri:android:build": "tauri android build"
   },
   "dependencies": {
-    "@astrojs/netlify": "^6.5.9",
-    "@tailwindcss/vite": "^4.1.13",
-    "@tauri-apps/api": "^2.8.0",
+    "@astrojs/netlify": "^6.6.0",
+    "@tailwindcss/vite": "^4.1.16",
+    "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-process": "^2.3.0",
     "@tauri-apps/plugin-store": "^2.4.0",
     "@tauri-apps/plugin-updater": "^2.9.0",
-    "astro": "^5.13.5",
+    "astro": "^5.15.1",
     "tailwind-scrollbar": "^4.0.2",
-    "tailwindcss": "^4.1.13"
+    "tailwindcss": "^4.1.16"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.8.4",
+    "@tauri-apps/cli": "^2.9.1",
     "tiny-glob": "^0.2.9"
   }
 }
