@@ -9,6 +9,7 @@ pub enum Tab {
     Movies,
     Series,
     Favorites,
+    Recent,
     Info,
     Console,
 }

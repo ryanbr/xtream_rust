@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Xtreme IPTV
+Comment=Cross-platform IPTV player with Xtream Codes API support
+Exec=xtreme_iptv
+Icon=xtreme_iptv
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;Player;TV;
+Keywords=IPTV;streaming;TV;video;player;
+StartupWMClass=xtreme_iptv

@@ -220,6 +220,9 @@ struct IPTVApp {
     // Favorites
     favorites: Vec<FavoriteItem>,
     
+    // Recently watched (last 20)
+    recent_watched: Vec<FavoriteItem>,
+    
     navigation_stack: Vec<NavigationLevel>,
     
     // Info
@@ -306,6 +309,13 @@ impl IPTVApp {
             Vec::new()
         };
         
+        // Load recent watched from JSON
+        let recent_watched: Vec<FavoriteItem> = if !config.recent_watched_json.is_empty() {
+            serde_json::from_str(&config.recent_watched_json).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        
         // Extract values before moving config
         let single_window_mode = config.single_window_mode;
         let hw_accel = config.hw_accel;
@@ -332,6 +342,7 @@ impl IPTVApp {
             current_seasons: Vec::new(),
             current_episodes: Vec::new(),
             favorites,
+            recent_watched,
             navigation_stack: Vec::new(),
             user_info: UserInfo::default(),
             server_info: ServerInfo::default(),
@@ -805,6 +816,34 @@ impl IPTVApp {
     }
 
     fn play_channel(&mut self, channel: &Channel) {
+        // Add to recently watched
+        let category_name = self.navigation_stack.iter().find_map(|n| {
+            match n {
+                NavigationLevel::Channels(name) => Some(name.clone()),
+                NavigationLevel::Series(name) => Some(name.clone()),
+                _ => None,
+            }
+        }).unwrap_or_default();
+        
+        // Determine stream type
+        let stream_type = if channel.series_id.is_some() {
+            "series"
+        } else if self.current_tab == Tab::Live {
+            "live"
+        } else {
+            "movie"
+        };
+        
+        self.add_to_recent(FavoriteItem {
+            name: channel.name.clone(),
+            url: channel.url.clone(),
+            stream_type: stream_type.to_string(),
+            stream_id: channel.stream_id,
+            series_id: channel.series_id,
+            category_name,
+            container_extension: channel.container_extension.clone(),
+        });
+        
         // Use internal player if enabled OR if user typed "internal" in player field
         let player_lower = self.external_player.to_lowercase();
         let use_internal = self.use_internal_player || player_lower == "internal";
@@ -1168,6 +1207,11 @@ impl IPTVApp {
     }
 
     fn play_episode(&mut self, episode: &Episode, series_id: i64) {
+        // Get series name from navigation
+        let series_name = self.navigation_stack.iter().find_map(|n| {
+            if let NavigationLevel::Series(name) = n { Some(name.clone()) } else { None }
+        }).unwrap_or_else(|| "Series".to_string());
+        
         let url = format!(
             "{}/series/{}/{}/{}.{}",
             self.server, self.username, self.password,
@@ -1175,9 +1219,9 @@ impl IPTVApp {
         );
         
         let channel = Channel {
-            name: episode.title.clone(),
+            name: format!("{} - {}", series_name, episode.title),
             url,
-            stream_id: None,
+            stream_id: Some(episode.id),
             category_id: None,
             epg_channel_id: None,
             stream_icon: None,
@@ -1571,6 +1615,7 @@ impl eframe::App for IPTVApp {
                 ui.selectable_value(&mut self.current_tab, Tab::Movies, "🎬 MOVIES");
                 ui.selectable_value(&mut self.current_tab, Tab::Series, "📺 SERIES");
                 ui.selectable_value(&mut self.current_tab, Tab::Favorites, "⭐ FAVORITES");
+                ui.selectable_value(&mut self.current_tab, Tab::Recent, "🕐 RECENT");
                 ui.selectable_value(&mut self.current_tab, Tab::Info, "ℹ️ INFO");
                 
                 // Push Console to the right
@@ -1581,8 +1626,8 @@ impl eframe::App for IPTVApp {
             
             ui.separator();
 
-            // Search bar (not for Info, Favorites, or Console tab)
-            if self.current_tab != Tab::Info && self.current_tab != Tab::Favorites && self.current_tab != Tab::Console {
+            // Search bar (not for Info, Favorites, Recent, or Console tab)
+            if self.current_tab != Tab::Info && self.current_tab != Tab::Favorites && self.current_tab != Tab::Recent && self.current_tab != Tab::Console {
                 ui.horizontal(|ui| {
                     if !self.navigation_stack.is_empty() {
                         if ui.button("⬅ Back").clicked() {
@@ -1605,6 +1650,7 @@ impl eframe::App for IPTVApp {
                     Tab::Movies => self.show_movies_tab(ui),
                     Tab::Series => self.show_series_tab(ui),
                     Tab::Favorites => self.show_favorites_tab(ui),
+                    Tab::Recent => self.show_recent_tab(ui),
                     Tab::Info => self.show_info_tab(ui),
                     Tab::Console => self.show_console_tab(ui),
                 }
@@ -2104,6 +2150,111 @@ impl IPTVApp {
             self.config.save();
             self.status_message = "All favorites cleared".to_string();
         }
+    }
+
+    fn show_recent_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Recently Watched");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !self.recent_watched.is_empty() && ui.button("🗑 Clear History").clicked() {
+                    self.recent_watched.clear();
+                    self.config.recent_watched_json.clear();
+                    self.config.save();
+                    self.status_message = "Watch history cleared".to_string();
+                }
+            });
+        });
+        ui.separator();
+        
+        if self.recent_watched.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(50.0);
+                ui.heading("No watch history");
+                ui.label("Streams you play will appear here");
+            });
+            return;
+        }
+        
+        // Clone to avoid borrow issues
+        let recent: Vec<_> = self.recent_watched.iter().cloned().collect();
+        let mut to_play: Option<FavoriteItem> = None;
+        let mut to_remove: Option<usize> = None;
+        let mut to_toggle_fav: Option<FavoriteItem> = None;
+        
+        for (idx, item) in recent.iter().enumerate() {
+            ui.horizontal(|ui| {
+                // Favorite toggle button
+                let is_fav = self.favorites.iter().any(|f| f.url == item.url);
+                if is_fav {
+                    if ui.button(egui::RichText::new("★").size(16.0).color(egui::Color32::GOLD))
+                        .on_hover_text("Remove from favorites")
+                        .clicked() 
+                    {
+                        to_toggle_fav = Some(item.clone());
+                    }
+                } else {
+                    if ui.button(egui::RichText::new("☆").size(16.0).color(egui::Color32::GRAY))
+                        .on_hover_text("Add to favorites")
+                        .clicked() 
+                    {
+                        to_toggle_fav = Some(item.clone());
+                    }
+                }
+                
+                if ui.button("▶").clicked() {
+                    to_play = Some(item.clone());
+                }
+                
+                // Type icon
+                let type_icon = match item.stream_type.as_str() {
+                    "live" => "📺",
+                    "movie" => "🎬",
+                    "series" => "📺",
+                    _ => "▶",
+                };
+                ui.label(type_icon);
+                
+                ui.label(Self::sanitize_text(&item.name));
+                ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&item.category_name))).weak());
+                
+                // Remove from history button
+                if ui.small_button("✕").on_hover_text("Remove from history").clicked() {
+                    to_remove = Some(idx);
+                }
+            });
+        }
+        
+        // Handle favorite toggle
+        if let Some(item) = to_toggle_fav {
+            self.toggle_favorite(item);
+        }
+        
+        // Handle play
+        if let Some(item) = to_play {
+            self.play_favorite(&item);
+        }
+        
+        // Handle removal
+        if let Some(idx) = to_remove {
+            self.recent_watched.remove(idx);
+            self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
+            self.config.save();
+        }
+    }
+
+    fn add_to_recent(&mut self, item: FavoriteItem) {
+        // Remove if already in list (to move to top)
+        self.recent_watched.retain(|r| r.url != item.url);
+        
+        // Add to front (newest first)
+        self.recent_watched.insert(0, item);
+        
+        // Keep only last 25
+        self.recent_watched.truncate(25);
+        
+        // Save
+        self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
+        self.config.save();
     }
 
     fn show_info_tab(&self, ui: &mut egui::Ui) {

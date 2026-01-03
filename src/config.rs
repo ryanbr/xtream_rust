@@ -67,6 +67,9 @@ pub struct AppConfig {
     // Favorites (stored as JSON)
     #[serde(default)]
     pub favorites_json: String,
+    // Recently watched (stored as JSON)
+    #[serde(default)]
+    pub recent_watched_json: String,
 }
 
 fn default_buffer() -> u32 { 5 }
@@ -94,6 +97,7 @@ impl Default for AppConfig {
             auto_login: false,
             hw_accel: true,
             favorites_json: String::new(),
+            recent_watched_json: String::new(),
         }
     }
 }
