@@ -299,8 +299,8 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
     viewport: egui::ViewportBuilder::default()
-        .with_inner_size([900.0, 650.0])
-        .with_min_inner_size([700.0, 500.0])
+        .with_inner_size([1020.0, 650.0])
+        .with_min_inner_size([800.0, 500.0])
         .with_icon(icon),
     vsync: true,
     hardware_acceleration: eframe::HardwareAcceleration::Preferred,
@@ -476,6 +476,7 @@ struct IPTVApp {
     epg_time_offset: f32,
     epg_auto_update: EpgAutoUpdate,
     epg_last_update: Option<i64>,
+    selected_epg_channel: Option<String>,
 }
 
 impl Default for IPTVApp {
@@ -590,6 +591,7 @@ impl IPTVApp {
             epg_time_offset: epg_time_offset,
             epg_auto_update: EpgAutoUpdate::from_index(epg_auto_update_index),
             epg_last_update: None,
+            selected_epg_channel: None,
         }
     }
     
@@ -1102,6 +1104,37 @@ impl IPTVApp {
             .get(epg_channel_id)?
             .iter()
             .find(|p| p.start <= adjusted_now && p.stop > adjusted_now)
+    }
+    
+    /// Get current and next N programs for a channel (with time offset applied)
+    fn get_upcoming_programs(&self, epg_channel_id: &str, count: usize) -> Vec<&epg_parser::Program> {
+        let Some(epg) = self.epg_data.as_ref() else { return Vec::new() };
+        let offset_secs = (self.epg_time_offset * 3600.0) as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let adjusted_now = now - offset_secs;
+        
+        epg.programs
+            .get(epg_channel_id)
+            .map(|progs| {
+                progs.iter()
+                    .filter(|p| p.stop > adjusted_now)
+                    .take(count)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    
+    /// Get adjusted "now" timestamp accounting for EPG time offset
+    fn get_adjusted_now(&self) -> i64 {
+        let offset_secs = (self.epg_time_offset * 3600.0) as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        now - offset_secs
     }
 
     fn play_channel(&mut self, channel: &Channel) {
@@ -2009,7 +2042,25 @@ impl eframe::App for IPTVApp {
                 ui.separator();
             }
 
-            // Content area
+            // Content area - split into channels (left) and EPG grid (right)
+            let has_epg = self.epg_data.is_some();
+            let show_epg_panel = has_epg && 
+                (self.current_tab == Tab::Live || 
+                 self.current_tab == Tab::Favorites || 
+                 self.current_tab == Tab::Recent);
+            
+            if show_epg_panel {
+                // Two-column layout: channels on left, EPG on right
+                egui::SidePanel::right("epg_panel")
+                    .resizable(true)
+                    .default_width(400.0)
+                    .min_width(300.0)
+                    .show_inside(ui, |ui| {
+                        self.show_epg_grid_panel(ui);
+                    });
+            }
+            
+            // Main content (channels/categories)
             egui::ScrollArea::vertical().show(ui, |ui| {
                 match self.current_tab {
                     Tab::Live => self.show_live_tab(ui),
@@ -2887,6 +2938,199 @@ impl IPTVApp {
                     ui.label(egui::RichText::new(line).monospace().color(color));
                 }
             });
+    }
+    
+    fn show_epg_grid_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("📺 EPG Guide");
+        ui.separator();
+        
+        let adjusted_now = self.get_adjusted_now();
+        
+        // Time header
+        ui.horizontal(|ui| {
+            ui.label("              "); // Spacer for channel name column
+            let time_labels = ["Now", "+30m", "+60m", "+90m"];
+            for label in time_labels {
+                ui.label(egui::RichText::new(label).small().strong());
+                ui.add_space(40.0);
+            }
+        });
+        
+        ui.separator();
+        
+        // Get channels to display based on current view
+        let channels_to_show: Vec<(String, Option<String>)> = match self.current_tab {
+            Tab::Live => {
+                self.current_channels.iter()
+                    .take(20) // Limit for performance
+                    .filter_map(|c| c.epg_channel_id.as_ref().map(|id| (c.name.clone(), Some(id.clone()))))
+                    .collect()
+            }
+            Tab::Favorites | Tab::Recent => {
+                let items = if self.current_tab == Tab::Favorites {
+                    &self.favorites
+                } else {
+                    &self.recent_watched
+                };
+                items.iter()
+                    .filter(|f| f.stream_type == "live")
+                    .take(20)
+                    .map(|f| (f.name.clone(), None)) // Favorites don't store epg_channel_id directly
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        
+        // EPG Grid
+        egui::ScrollArea::vertical()
+            .id_salt("epg_grid_scroll")
+            .show(ui, |ui| {
+                for (channel_name, epg_id_opt) in &channels_to_show {
+                    // Try to find EPG ID from current_channels if not provided
+                    let epg_id = epg_id_opt.clone().or_else(|| {
+                        self.current_channels.iter()
+                            .find(|c| c.name == *channel_name)
+                            .and_then(|c| c.epg_channel_id.clone())
+                    });
+                    
+                    let is_selected = self.selected_epg_channel.as_ref() == Some(channel_name);
+                    
+                    ui.horizontal(|ui| {
+                        // Channel name (clickable)
+                        let name_text = Self::sanitize_text(channel_name);
+                        let short_name: String = name_text.chars().take(12).collect();
+                        
+                        let response = ui.selectable_label(is_selected, 
+                            egui::RichText::new(&short_name).strong());
+                        if response.clicked() {
+                            self.selected_epg_channel = Some(channel_name.clone());
+                        }
+                        
+                        ui.separator();
+                        
+                        // Program blocks
+                        if let Some(ref id) = epg_id {
+                            let programs = self.get_upcoming_programs(id, 4);
+                            
+                            for (idx, prog) in programs.iter().enumerate() {
+                                let is_current = prog.start <= adjusted_now && prog.stop > adjusted_now;
+                                let duration_mins = (prog.stop - prog.start) / 60;
+                                
+                                // Calculate width based on duration (roughly 1 pixel per minute, min 50)
+                                let width = (duration_mins as f32 * 1.0).clamp(50.0, 120.0);
+                                
+                                // Truncate title to fit
+                                let title: String = prog.title.chars().take(12).collect();
+                                let display = if prog.title.len() > 12 {
+                                    format!("{}…", title)
+                                } else {
+                                    title
+                                };
+                                
+                                let bg_color = if is_current {
+                                    egui::Color32::from_rgb(60, 100, 60)
+                                } else if idx % 2 == 0 {
+                                    egui::Color32::from_rgb(50, 50, 70)
+                                } else {
+                                    egui::Color32::from_rgb(40, 40, 60)
+                                };
+                                
+                                let text_color = if is_current {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::LIGHT_GRAY
+                                };
+                                
+                                egui::Frame::none()
+                                    .fill(bg_color)
+                                    .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+                                    .rounding(2.0)
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(width);
+                                        ui.set_max_width(width);
+                                        let response = ui.label(
+                                            egui::RichText::new(&display)
+                                                .small()
+                                                .color(text_color)
+                                        );
+                                        response.on_hover_text(format!(
+                                            "{}\n{} - {}\n{}m",
+                                            prog.title,
+                                            Self::format_time(prog.start),
+                                            Self::format_time(prog.stop),
+                                            duration_mins
+                                        ));
+                                    });
+                            }
+                            
+                            if programs.is_empty() {
+                                ui.label(egui::RichText::new("No EPG data").weak().small());
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("No EPG ID").weak().small());
+                        }
+                    });
+                }
+                
+                if channels_to_show.is_empty() {
+                    ui.label("Select a category to view EPG");
+                }
+            });
+        
+        ui.separator();
+        
+        // Selected program details
+        if let Some(ref channel_name) = self.selected_epg_channel.clone() {
+            let epg_id = self.current_channels.iter()
+                .find(|c| c.name == *channel_name)
+                .and_then(|c| c.epg_channel_id.clone());
+            
+            if let Some(ref id) = epg_id {
+                if let Some(prog) = self.get_current_program(id) {
+                    ui.group(|ui| {
+                        ui.heading(egui::RichText::new(&prog.title).size(14.0));
+                        
+                        let duration_mins = (prog.stop - prog.start) / 60;
+                        let elapsed = (adjusted_now - prog.start).max(0) / 60;
+                        let remaining = duration_mins - elapsed;
+                        
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!(
+                                "{} - {} ({}m remaining)",
+                                Self::format_time(prog.start),
+                                Self::format_time(prog.stop),
+                                remaining
+                            )).small());
+                        });
+                        
+                        // Progress bar
+                        let progress = elapsed as f32 / duration_mins as f32;
+                        ui.add(egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+                            .show_percentage());
+                        
+                        if let Some(ref desc) = prog.description {
+                            ui.separator();
+                            ui.label(egui::RichText::new(desc).small());
+                        }
+                        
+                        if let Some(ref cat) = prog.category {
+                            ui.label(egui::RichText::new(format!("Category: {}", cat)).weak().small());
+                        }
+                        
+                        if let Some(ref ep) = prog.episode {
+                            ui.label(egui::RichText::new(format!("Episode: {}", ep)).weak().small());
+                        }
+                    });
+                }
+            }
+        }
+    }
+    
+    fn format_time(ts: i64) -> String {
+        let secs = ts % 86400;
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{:02}:{:02}", hours, mins)
     }
 }
 
