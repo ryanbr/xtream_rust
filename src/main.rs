@@ -39,6 +39,115 @@ fn timestamp_now() -> String {
     format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
+/// Load application icon - matches assets/icon.svg design
+fn load_icon() -> egui::IconData {
+    let size: usize = 64;
+    let mut rgba = vec![0u8; size * size * 4];
+    
+    for y in 0..size {
+        for x in 0..size {
+            let idx = (y * size + x) * 4;
+            
+            // Normalize coordinates to 0.0-1.0
+            let nx = x as f32 / size as f32;
+            let ny = y as f32 / size as f32;
+            
+            // Rounded rectangle check (background)
+            let corner_radius = 0.125; // ~8px on 64px
+            let in_rounded_rect = {
+                let dx = if nx < corner_radius { corner_radius - nx } 
+                         else if nx > 1.0 - corner_radius { nx - (1.0 - corner_radius) } 
+                         else { 0.0 };
+                let dy = if ny < corner_radius { corner_radius - ny } 
+                         else if ny > 1.0 - corner_radius { ny - (1.0 - corner_radius) } 
+                         else { 0.0 };
+                dx * dx + dy * dy <= corner_radius * corner_radius
+            };
+            
+            if !in_rounded_rect {
+                // Transparent outside rounded rect
+                rgba[idx] = 0;
+                rgba[idx + 1] = 0;
+                rgba[idx + 2] = 0;
+                rgba[idx + 3] = 0;
+                continue;
+            }
+            
+            // Purple gradient background (#667eea to #764ba2)
+            let gradient_t = nx * 0.5 + ny * 0.5;
+            let r = (102.0 + (118.0 - 102.0) * gradient_t) as u8;  // 102 -> 118
+            let g = (126.0 + (75.0 - 126.0) * gradient_t) as u8;   // 126 -> 75
+            let b = (234.0 + (162.0 - 234.0) * gradient_t) as u8;  // 234 -> 162
+            
+            // TV screen area (centered rectangle)
+            let screen_left = 0.15;
+            let screen_right = 0.85;
+            let screen_top = 0.18;
+            let screen_bottom = 0.65;
+            let in_screen = nx >= screen_left && nx <= screen_right && ny >= screen_top && ny <= screen_bottom;
+            
+            // Play button triangle (center of screen)
+            let play_cx = 0.45;
+            let play_cy = 0.40;
+            let in_play = {
+                let px = nx - play_cx;
+                let py = ny - play_cy;
+                px >= 0.0 && px <= 0.15 && py.abs() <= px * 0.8
+            };
+            
+            // Stand
+            let in_stand_top = nx >= 0.40 && nx <= 0.60 && ny >= 0.68 && ny <= 0.72;
+            let in_stand_bottom = nx >= 0.35 && nx <= 0.65 && ny >= 0.73 && ny <= 0.78;
+            
+            // X letter at bottom
+            let x_cx = 0.5;
+            let x_cy = 0.88;
+            let x_size = 0.08;
+            let dx = (nx - x_cx).abs();
+            let dy = (ny - x_cy).abs();
+            let in_x = dx < x_size && dy < x_size && ((dx - dy).abs() < 0.025 || (dx + dy - x_size).abs() < 0.025);
+            
+            if in_screen && !in_play {
+                // Dark screen (#1a1a2e)
+                rgba[idx] = 26;
+                rgba[idx + 1] = 26;
+                rgba[idx + 2] = 46;
+                rgba[idx + 3] = 255;
+            } else if in_play {
+                // Play button (purple #667eea)
+                rgba[idx] = 102;
+                rgba[idx + 1] = 126;
+                rgba[idx + 2] = 234;
+                rgba[idx + 3] = 255;
+            } else if in_stand_top || in_stand_bottom {
+                // Stand (#2d3748)
+                rgba[idx] = 45;
+                rgba[idx + 1] = 55;
+                rgba[idx + 2] = 72;
+                rgba[idx + 3] = 255;
+            } else if in_x {
+                // White X
+                rgba[idx] = 255;
+                rgba[idx + 1] = 255;
+                rgba[idx + 2] = 255;
+                rgba[idx + 3] = 255;
+            } else {
+                // Background gradient
+                rgba[idx] = r;
+                rgba[idx + 1] = g;
+                rgba[idx + 2] = b;
+                rgba[idx + 3] = 255;
+            }
+        }
+    }
+    
+    egui::IconData {
+        rgba,
+        width: size as u32,
+        height: size as u32,
+    }
+}
+
 /// Background task messages
 enum TaskResult {
     CategoriesLoaded {
@@ -110,10 +219,14 @@ fn main() -> Result<(), eframe::Error> {
         std::env::remove_var("WAYLAND_DISPLAY");
     }
 
+    // Load icon from embedded bytes
+    let icon = load_icon();
+
     let options = eframe::NativeOptions {
     viewport: egui::ViewportBuilder::default()
         .with_inner_size([900.0, 650.0])
-        .with_min_inner_size([700.0, 500.0]),
+        .with_min_inner_size([700.0, 500.0])
+        .with_icon(icon),
     vsync: true,
     hardware_acceleration: eframe::HardwareAcceleration::Preferred,
     ..Default::default()

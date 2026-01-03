@@ -1,9 +1,9 @@
 [package]
 name = "xtreme_iptv"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Cross-platform IPTV player with Xtream Codes API support"
-license = "GPL"
+license = "MIT"
 authors = ["Xtreme IPTV"]
 
 [features]
