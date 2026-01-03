@@ -5,6 +5,7 @@ A fast, lightweight, cross-platform IPTV player with Xtream Codes API support bu
 ![Platform](https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-blue)
 ![Language](https://img.shields.io/badge/language-Rust-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![npm](https://img.shields.io/npm/v/@fanboynz/xtreme-iptv)](https://www.npmjs.com/package/@fanboynz/xtreme-iptv)
 
 ## Features
 
@@ -96,9 +97,22 @@ A fast, lightweight, cross-platform IPTV player with Xtream Codes API support bu
 
 ## Installation
 
+### Via npm (Easiest)
+
+```bash
+# Global install
+npm install -g @fanboynz/xtreme-iptv
+
+# Run
+xtreme-iptv
+
+# Or run directly without installing
+npx @fanboynz/xtreme-iptv
+```
+
 ### Pre-built Binaries
 
-Download from the [Releases](https://github.com/yourrepo/xtreme_iptv/releases) page.
+Download from the [Releases](https://github.com/ryanbr/xtream_rust/releases) page.
 
 ### Build from Source
 

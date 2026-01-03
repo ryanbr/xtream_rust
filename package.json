@@ -1,29 +1,50 @@
 {
-  "name": "xtream",
-  "type": "module",
-  "version": "0.3.4",
+  "name": "@fanboynz/xtreme-iptv",
+  "version": "0.1.0",
+  "description": "Fast, lightweight, cross-platform IPTV player with Xtream Codes API support",
+  "keywords": [
+    "iptv",
+    "xtream",
+    "xtream-codes",
+    "streaming",
+    "tv",
+    "video",
+    "player",
+    "rust",
+    "cross-platform"
+  ],
+  "author": "fanboynz",
+  "license": "GPL",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ryanbr/xtream_rust.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ryanbr/xtream_rust/issues"
+  },
+  "homepage": "https://github.com/ryanbr/xtream_rust#readme",
+  "bin": {
+    "xtreme-iptv": "bin/xtreme-iptv"
+  },
   "scripts": {
-    "dev": "astro dev --host",
-    "build": "astro build",
-    "preview": "astro preview",
-    "astro": "astro",
-    "tauri": "tauri",
-    "tauri:android": "tauri android",
-    "tauri:android:build": "tauri android build"
+    "postinstall": "node scripts/install.js"
   },
-  "dependencies": {
-    "@astrojs/netlify": "^6.6.0",
-    "@tailwindcss/vite": "^4.1.16",
-    "@tauri-apps/api": "^2.9.0",
-    "@tauri-apps/plugin-process": "^2.3.0",
-    "@tauri-apps/plugin-store": "^2.4.0",
-    "@tauri-apps/plugin-updater": "^2.9.0",
-    "astro": "^5.15.1",
-    "tailwind-scrollbar": "^4.0.2",
-    "tailwindcss": "^4.1.16"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.9.1",
-    "tiny-glob": "^0.2.9"
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=14"
   }
 }

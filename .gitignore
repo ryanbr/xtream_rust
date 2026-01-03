@@ -1,30 +1,15 @@
-# build output
-dist/
-# generated types
-.astro/
-
-# dependencies
+/target/
+/dist/
+/release/
+/x86_64-pc-windows-gnu/
+/aarch64-*/
+*.exe
+xtreme_iptv_*
+Cargo.lock
+CACHEDIR.TAG
 node_modules/
-
-# logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-
-# environment variables
-.env
-.env.production
-
-# macOS-specific files
+package-lock.json
+bin/
+install.js
 .DS_Store
-
-# jetbrains setting folder
-.idea/
-
-# Local Netlify folder
-.netlify
-
-buildfiles/
-dump/
+Thumbs.db
