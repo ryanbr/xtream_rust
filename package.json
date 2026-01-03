@@ -1,6 +1,6 @@
 {
-  "name": "xtream-rust",
-  "version": "0.1.0",
+  "name": "@fanboynz/xtreme-iptv",
+  "version": "0.1.1",
   "description": "Fast, lightweight, cross-platform IPTV player with Xtream Codes API support",
   "keywords": [
     "iptv",
