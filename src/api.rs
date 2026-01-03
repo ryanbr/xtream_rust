@@ -60,6 +60,7 @@ pub struct XtreamClient {
     username: String,
     password: String,
     user_agent: String,
+    use_post: bool,
 }
 
 impl XtreamClient {
@@ -69,11 +70,17 @@ impl XtreamClient {
             username: username.to_string(),
             password: password.to_string(),
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".to_string(),
+            use_post: false,
         }
     }
 
     pub fn with_user_agent(mut self, user_agent: &str) -> Self {
         self.user_agent = user_agent.to_string();
+        self
+    }
+
+    pub fn with_post_method(mut self, use_post: bool) -> Self {
+        self.use_post = use_post;
         self
     }
 
@@ -102,16 +109,38 @@ impl XtreamClient {
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
-        // Send HTTP GET request with configurable user agent
-        let request = format!(
-            "GET {} HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Connection: close\r\n\
-             User-Agent: {}\r\n\
-             Accept: application/json\r\n\
-             \r\n",
-            path, host, self.user_agent
-        );
+        // Send HTTP request (GET or POST)
+        let request = if self.use_post {
+            // Extract query string from path for POST body
+            let (base_path, query) = if let Some(pos) = path.find('?') {
+                (&path[..pos], &path[pos + 1..])
+            } else {
+                (path.as_str(), "")
+            };
+            
+            format!(
+                "POST {} HTTP/1.1\r\n\
+                 Host: {}\r\n\
+                 Connection: close\r\n\
+                 User-Agent: {}\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\n\
+                 Content-Length: {}\r\n\
+                 Accept: application/json\r\n\
+                 \r\n\
+                 {}",
+                base_path, host, self.user_agent, query.len(), query
+            )
+        } else {
+            format!(
+                "GET {} HTTP/1.1\r\n\
+                 Host: {}\r\n\
+                 Connection: close\r\n\
+                 User-Agent: {}\r\n\
+                 Accept: application/json\r\n\
+                 \r\n",
+                path, host, self.user_agent
+            )
+        };
         stream.write_all(request.as_bytes())?;
 
         // Read response

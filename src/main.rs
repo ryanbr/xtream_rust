@@ -560,28 +560,33 @@ impl IPTVApp {
         let username = self.username.clone();
         let password = self.password.clone();
         let user_agent = self.get_user_agent();
+        let use_post = self.use_post_method;
         let sender = self.task_sender.clone();
 
         thread::spawn(move || {
             let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent);
+                .with_user_agent(&user_agent)
+                .with_post_method(use_post);
 
             // Fetch categories in parallel
             let live_handle = {
                 let client = XtreamClient::new(&server, &username, &password)
-                    .with_user_agent(&user_agent);
+                    .with_user_agent(&user_agent)
+                    .with_post_method(use_post);
                 thread::spawn(move || client.get_live_categories())
             };
             
             let movies_handle = {
                 let client = XtreamClient::new(&server, &username, &password)
-                    .with_user_agent(&user_agent);
+                    .with_user_agent(&user_agent)
+                    .with_post_method(use_post);
                 thread::spawn(move || client.get_vod_categories())
             };
             
             let series_handle = {
                 let client = XtreamClient::new(&server, &username, &password)
-                    .with_user_agent(&user_agent);
+                    .with_user_agent(&user_agent)
+                    .with_post_method(use_post);
                 thread::spawn(move || client.get_series_categories())
             };
 
@@ -699,13 +704,15 @@ impl IPTVApp {
         let username = self.username.clone();
         let password = self.password.clone();
         let user_agent = self.get_user_agent();
+        let use_post = self.use_post_method;
         let category_id = category_id.to_string();
         let stream_type = stream_type.to_string();
         let sender = self.task_sender.clone();
 
         thread::spawn(move || {
             let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent);
+                .with_user_agent(&user_agent)
+                .with_post_method(use_post);
             
             let result = match stream_type.as_str() {
                 "live" => client.get_live_streams(&category_id),
@@ -751,12 +758,14 @@ impl IPTVApp {
         let username = self.username.clone();
         let password = self.password.clone();
         let user_agent = self.get_user_agent();
+        let use_post = self.use_post_method;
         let category_id = category_id.to_string();
         let sender = self.task_sender.clone();
 
         thread::spawn(move || {
             let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent);
+                .with_user_agent(&user_agent)
+                .with_post_method(use_post);
             
             if let Ok(series) = client.get_series(&category_id) {
                 let _ = sender.send(TaskResult::SeriesListLoaded(series));
@@ -774,11 +783,13 @@ impl IPTVApp {
         let username = self.username.clone();
         let password = self.password.clone();
         let user_agent = self.get_user_agent();
+        let use_post = self.use_post_method;
         let sender = self.task_sender.clone();
 
         thread::spawn(move || {
             let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent);
+                .with_user_agent(&user_agent)
+                .with_post_method(use_post);
             
             if let Ok(info) = client.get_series_info(series_id) {
                 if let Some(episodes) = info.get("episodes") {
@@ -806,11 +817,13 @@ impl IPTVApp {
         let username = self.username.clone();
         let password = self.password.clone();
         let user_agent = self.get_user_agent();
+        let use_post = self.use_post_method;
         let sender = self.task_sender.clone();
 
         thread::spawn(move || {
             let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent);
+                .with_user_agent(&user_agent)
+                .with_post_method(use_post);
             
             if let Ok(info) = client.get_series_info(series_id) {
                 if let Some(episodes) = info.get("episodes") {
