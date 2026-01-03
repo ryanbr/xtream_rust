@@ -4,6 +4,11 @@
 // Hide console window on Windows release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Use mimalloc for faster memory allocation (Linux, macOS)
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
