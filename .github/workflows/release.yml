@@ -22,8 +22,15 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             name: linux_x64
+            cross: false
           - target: aarch64-unknown-linux-gnu
             name: linux_arm64
+            cross: true
+            linker: gcc-aarch64-linux-gnu
+          - target: riscv64gc-unknown-linux-gnu
+            name: linux_riscv64
+            cross: true
+            linker: gcc-riscv64-linux-gnu
     steps:
       - uses: actions/checkout@v4
       
@@ -33,15 +40,17 @@ jobs:
           targets: ${{ matrix.target }}
       
       - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y ${{ matrix.linker }}
       
       - name: Build
         run: |
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          elif [ "${{ matrix.target }}" = "riscv64gc-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc
           fi
           cargo build --release --target ${{ matrix.target }}
       
@@ -152,6 +161,7 @@ jobs:
           mkdir release
           cp artifacts/xtreme_iptv_linux_x64/xtreme_iptv_linux_x64 release/
           cp artifacts/xtreme_iptv_linux_arm64/xtreme_iptv_linux_arm64 release/
+          cp artifacts/xtreme_iptv_linux_riscv64/xtreme_iptv_linux_riscv64 release/
           cp artifacts/xtreme_iptv_windows_x64/xtreme_iptv_windows_x64.exe release/
           cp artifacts/xtreme_iptv_windows_arm64/xtreme_iptv_windows_arm64.exe release/
           cp artifacts/xtreme_iptv_macos_x64/xtreme_iptv_macos_x64 release/
