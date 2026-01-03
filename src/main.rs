@@ -16,7 +16,6 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::io::{BufRead, BufReader};
-use chrono;
 
 mod api;
 mod config;
@@ -28,6 +27,16 @@ use config::*;
 use ffmpeg_player::PlayerWindow;
 
 // Re-export ConnectionQuality for use in main
+
+/// Get current time as HH:MM:SS (UTC)
+fn timestamp_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let secs = now % 86400;
+    format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
 
 /// Background task messages
 enum TaskResult {
@@ -421,7 +430,7 @@ impl IPTVApp {
     }
     
     fn log(&mut self, message: &str) {
-        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        let timestamp = timestamp_now();
         self.console_log.push(format!("[{}] {}", timestamp, message));
         // Keep last 500 lines
         if self.console_log.len() > 500 {
@@ -2196,7 +2205,7 @@ impl IPTVApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("🗑 Clear").clicked() {
                     self.console_log.clear();
-                    self.console_log.push(format!("[{}] Console cleared", chrono::Local::now().format("%H:%M:%S")));
+                    self.console_log.push(format!("[{}] Console cleared", timestamp_now()));
                 }
             });
         });
@@ -2230,6 +2239,6 @@ fn format_timestamp(ts: i64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
     
     let d = UNIX_EPOCH + Duration::from_secs(ts as u64);
-    // Simple formatting - in production use chrono crate
+    // Simple formatting
     format!("{:?}", d)
 }
