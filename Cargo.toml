@@ -50,6 +50,51 @@ rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-s"]
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static"]
 
+# Windows ARM64 - Optimized for Snapdragon X Elite/Plus
+# Features: NEON, AES, SHA2, CRC32, LSE (atomics), FP16, DotProd, RCPC
+[target.aarch64-pc-windows-gnullvm]
+rustflags = [
+    "-C", "target-cpu=cortex-a76",
+    "-C", "target-feature=+neon,+aes,+sha2,+crc,+lse,+fp16,+dotprod,+rcpc",
+    "-C", "link-arg=-s"
+]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-cpu=cortex-a76",
+    "-C", "target-feature=+neon,+aes,+sha2,+crc,+lse,+fp16,+dotprod,+rcpc",
+    "-C", "target-feature=+crt-static"
+]
+
 # Linux x64 with AVX/AVX2 optimizations (x86-64-v3)
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# Linux ARM64 - Optimized for Snapdragon/Apple Silicon/Ampere
+# Features: NEON, AES, SHA2, CRC32, LSE (atomics), FP16, DotProd, RCPC
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=cortex-a76",
+    "-C", "target-feature=+neon,+aes,+sha2,+crc,+lse,+fp16,+dotprod,+rcpc",
+    "-C", "link-arg=-s"
+]
+
+# Linux RISC-V 64-bit - Optimized with standard extensions
+# Features: RV64GC (General + Compressed) + V (Vector)
+[target.riscv64gc-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-feature=+c,+m,+a,+f,+d",
+    "-C", "link-arg=-s"
+]
+
+# macOS x64 (Intel) with AVX/AVX2 optimizations
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# macOS ARM64 (Apple Silicon M1/M2/M3/M4) - Optimized
+# Features: NEON, AES, SHA2, CRC32, LSE, FP16, DotProd
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "target-cpu=apple-m1",
+    "-C", "target-feature=+neon,+aes,+sha2,+crc,+lse,+fp16,+dotprod"
+]

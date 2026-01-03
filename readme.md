@@ -68,14 +68,31 @@ A fast, lightweight, cross-platform IPTV player with Xtream Codes API support bu
 | Windows | x64 (Intel/AMD) | ✅ Optimized | `xtreme_iptv_windows_x64.exe` |
 | Windows | ARM64 (Snapdragon) | ✅ Optimized | `xtreme_iptv_windows_arm64.exe` |
 | Linux | x64 (Intel/AMD) | ✅ Optimized | `xtreme_iptv_linux_x64` |
-| macOS | x64 / ARM64 | ✅ Supported | Build from source |
+| Linux | ARM64 (RPi, Snapdragon) | ✅ Optimized | `xtreme_iptv_linux_arm64` |
+| Linux | RISC-V 64 | ✅ Optimized | `xtreme_iptv_linux_riscv64` |
+| macOS | x64 (Intel) | ✅ Optimized | `xtreme_iptv_macos_x64` |
+| macOS | ARM64 (Apple Silicon) | ✅ Optimized | `xtreme_iptv_macos_arm64` |
+| macOS | Universal | ✅ Fat Binary | `xtreme_iptv_macos_universal` |
 
 ### CPU Optimizations
 
 | Platform | Optimizations |
 |----------|---------------|
 | **Windows/Linux x64** | AVX, AVX2, BMI1, BMI2, FMA, LZCNT, POPCNT (x86-64-v3) |
-| **Windows ARM64** | NEON, AES, SHA2, CRC32, LSE, FP16, DotProd (Snapdragon optimized) |
+| **Windows/Linux ARM64** | NEON, AES, SHA2, CRC32, LSE, FP16, DotProd (Snapdragon/Apple Silicon optimized) |
+| **Linux RISC-V 64** | RV64GC (General + Compressed + Multiply + Atomic + Float + Double) |
+| **macOS x64** | AVX, AVX2 (x86-64-v3) |
+| **macOS ARM64** | Apple M1/M2/M3/M4 optimized (NEON, AES, SHA2, CRC32, LSE, FP16, DotProd) |
+
+### Supported Hardware
+
+| Platform | Devices |
+|----------|---------|
+| **Windows ARM64** | Snapdragon X Elite/Plus, Snapdragon 8cx, Microsoft SQ3, Surface Pro X |
+| **Linux ARM64** | Raspberry Pi 4/5, NVIDIA Jetson, Apple Silicon (Asahi), Ampere Altra, AWS Graviton |
+| **Linux RISC-V** | StarFive VisionFive 2, SiFive HiFive, Milk-V Mars/Pioneer, LicheeRV |
+| **macOS ARM64** | MacBook Air/Pro (M1/M2/M3/M4), Mac Mini, Mac Studio, iMac, Mac Pro |
+| **macOS x64** | Intel MacBook, iMac, Mac Mini, Mac Pro (2012-2020) |
 
 ## Installation
 
@@ -97,13 +114,37 @@ Download from the [Releases](https://github.com/yourrepo/xtreme_iptv/releases) p
 # Linux x64
 ./build.sh linux
 
+# Linux ARM64 (Raspberry Pi, Snapdragon, etc.)
+./build.sh linux-arm
+
+# Linux RISC-V 64
+./build.sh linux-riscv
+
 # Windows x64 (cross-compile from Linux)
 ./build.sh windows
 
 # Windows ARM64 (cross-compile from Linux)
 ./build.sh windows-arm
 
-# All platforms
+# macOS x64 (Intel) - requires macOS
+./build.sh macos
+
+# macOS ARM64 (Apple Silicon) - requires macOS
+./build.sh macos-arm
+
+# macOS Universal binary (x64 + ARM64) - requires macOS
+./build.sh macos-universal
+
+# All Linux platforms
+./build.sh all-linux
+
+# All Windows platforms
+./build.sh all-windows
+
+# All macOS platforms (requires macOS)
+./build.sh all-macos
+
+# Everything (all platforms)
 ./build.sh everything
 
 # Show help
@@ -113,15 +154,42 @@ Download from the [Releases](https://github.com/yourrepo/xtreme_iptv/releases) p
 #### Install Dependencies (Linux)
 
 ```bash
-# Ubuntu/Debian
+# Ubuntu/Debian - x64 cross-compile tools
 sudo apt install mingw-w64
 
+# Ubuntu/Debian - ARM64 cross-compile tools
+sudo apt install gcc-aarch64-linux-gnu
+
+# Ubuntu/Debian - RISC-V cross-compile tools
+sudo apt install gcc-riscv64-linux-gnu
+
 # Fedora
-sudo dnf install mingw64-gcc
+sudo dnf install mingw64-gcc gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu
 
 # Arch
-sudo pacman -S mingw-w64-gcc
+sudo pacman -S mingw-w64-gcc aarch64-linux-gnu-gcc riscv64-linux-gnu-gcc
 ```
+
+#### macOS Cross-Compilation (from Linux)
+
+To cross-compile for macOS from Linux, you need [OSXCross](https://github.com/tpoechtrager/osxcross):
+
+```bash
+# Clone OSXCross
+git clone https://github.com/tpoechtrager/osxcross
+cd osxcross
+
+# Download Xcode SDK (requires Apple Developer account)
+# Place SDK in osxcross/tarballs/
+
+# Build OSXCross
+./build.sh
+
+# Add to PATH
+export PATH="$PWD/target/bin:$PATH"
+```
+
+Alternatively, build natively on a Mac for best results.
 
 ## Usage
 
