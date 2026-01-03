@@ -20,12 +20,14 @@ mod api;
 mod config;
 mod models;
 mod m3u_parser;
+mod epg_parser;
 mod ffmpeg_player;
 
 use api::*;
 use config::*;
 use models::*;
 use ffmpeg_player::PlayerWindow;
+use epg_parser::EpgData;
 
 // Re-export ConnectionQuality for use in main
 
@@ -166,6 +168,79 @@ enum TaskResult {
     Error(String),
     PlayerLog(String),
     PlayerExited { code: Option<i32>, stderr: String },
+    // EPG loading results
+    EpgLoading { progress: String },
+    EpgLoaded { data: Box<EpgData> },
+    EpgError(String),
+}
+
+/// EPG auto-update interval
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum EpgAutoUpdate {
+    Off,
+    Hours6,
+    Hours12,
+    #[default]
+    Day1,
+    Days2,
+    Days3,
+    Days4,
+    Days5,
+}
+
+impl EpgAutoUpdate {
+    fn as_secs(&self) -> Option<i64> {
+        match self {
+            EpgAutoUpdate::Off => None,
+            EpgAutoUpdate::Hours6 => Some(6 * 3600),
+            EpgAutoUpdate::Hours12 => Some(12 * 3600),
+            EpgAutoUpdate::Day1 => Some(24 * 3600),
+            EpgAutoUpdate::Days2 => Some(2 * 24 * 3600),
+            EpgAutoUpdate::Days3 => Some(3 * 24 * 3600),
+            EpgAutoUpdate::Days4 => Some(4 * 24 * 3600),
+            EpgAutoUpdate::Days5 => Some(5 * 24 * 3600),
+        }
+    }
+    
+    fn label(&self) -> &'static str {
+        match self {
+            EpgAutoUpdate::Off => "Off",
+            EpgAutoUpdate::Hours6 => "6 Hours",
+            EpgAutoUpdate::Hours12 => "12 Hours",
+            EpgAutoUpdate::Day1 => "1 Day",
+            EpgAutoUpdate::Days2 => "2 Days",
+            EpgAutoUpdate::Days3 => "3 Days",
+            EpgAutoUpdate::Days4 => "4 Days",
+            EpgAutoUpdate::Days5 => "5 Days",
+        }
+    }
+    
+    fn to_index(&self) -> u8 {
+        match self {
+            EpgAutoUpdate::Off => 0,
+            EpgAutoUpdate::Hours6 => 1,
+            EpgAutoUpdate::Hours12 => 2,
+            EpgAutoUpdate::Day1 => 3,
+            EpgAutoUpdate::Days2 => 4,
+            EpgAutoUpdate::Days3 => 5,
+            EpgAutoUpdate::Days4 => 6,
+            EpgAutoUpdate::Days5 => 7,
+        }
+    }
+    
+    fn from_index(i: u8) -> Self {
+        match i {
+            0 => EpgAutoUpdate::Off,
+            1 => EpgAutoUpdate::Hours6,
+            2 => EpgAutoUpdate::Hours12,
+            3 => EpgAutoUpdate::Day1,
+            4 => EpgAutoUpdate::Days2,
+            5 => EpgAutoUpdate::Days3,
+            6 => EpgAutoUpdate::Days4,
+            7 => EpgAutoUpdate::Days5,
+            _ => EpgAutoUpdate::Day1,
+        }
+    }
 }
 
 // Predefined user agents
@@ -390,6 +465,17 @@ struct IPTVApp {
     use_internal_player: bool,
     internal_player: PlayerWindow,
     show_internal_player: bool,
+    
+    // EPG state
+    show_epg_dialog: bool,
+    epg_url_input: String,
+    epg_data: Option<Box<EpgData>>,
+    epg_loading: bool,
+    epg_status: String,
+    epg_progress: f32,
+    epg_time_offset: f32,
+    epg_auto_update: EpgAutoUpdate,
+    epg_last_update: Option<i64>,
 }
 
 impl Default for IPTVApp {
@@ -432,6 +518,9 @@ impl IPTVApp {
         // Extract values before moving config
         let single_window_mode = config.single_window_mode;
         let hw_accel = config.hw_accel;
+        let epg_url = config.epg_url.clone();
+        let epg_auto_update_index = config.epg_auto_update_index;
+        let epg_time_offset = config.epg_time_offset;
         
         Self {
             server,
@@ -490,6 +579,17 @@ impl IPTVApp {
             use_internal_player: false,
             internal_player: PlayerWindow::new(),
             show_internal_player: false,
+            
+            // EPG state
+            show_epg_dialog: false,
+            epg_url_input: epg_url,
+            epg_data: None,
+            epg_loading: false,
+            epg_status: String::new(),
+            epg_progress: 0.0,
+            epg_time_offset: epg_time_offset,
+            epg_auto_update: EpgAutoUpdate::from_index(epg_auto_update_index),
+            epg_last_update: None,
         }
     }
     
@@ -515,6 +615,11 @@ impl IPTVApp {
         self.config.custom_user_agent = self.custom_user_agent.clone();
         self.config.use_custom_user_agent = self.use_custom_user_agent;
         self.config.pass_user_agent_to_player = self.pass_user_agent_to_player;
+        
+        // Save EPG settings
+        self.config.epg_url = self.epg_url_input.clone();
+        self.config.epg_auto_update_index = self.epg_auto_update.to_index();
+        self.config.epg_time_offset = self.epg_time_offset;
         
         // Save favorites
         self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
@@ -926,6 +1031,77 @@ impl IPTVApp {
                 let _ = sender.send(TaskResult::Error("Failed to load episodes".to_string()));
             }
         });
+    }
+
+    fn load_epg(&mut self) {
+        let url = self.epg_url_input.trim().to_string();
+        if url.is_empty() {
+            self.epg_status = "Please enter an EPG URL".to_string();
+            return;
+        }
+        
+        self.epg_loading = true;
+        self.epg_progress = 0.0;
+        self.epg_status = "Starting download...".to_string();
+        self.log(&format!("[INFO] Loading EPG from: {}", url));
+        
+        let sender = self.task_sender.clone();
+        let user_agent = self.get_user_agent();
+        
+        thread::spawn(move || {
+            use epg_parser::{DownloadConfig, EpgDownloader};
+            
+            let config = DownloadConfig {
+                max_retries: 3,
+                retry_delay_ms: 2000,
+                connect_timeout_secs: 30,
+                read_timeout_secs: 180,
+                chunk_size: 64 * 1024,
+                user_agent,
+            };
+            
+            // Progress callback sends updates to UI
+            let progress_sender = sender.clone();
+            let progress_callback: Option<epg_parser::ProgressCallback> = Some(Box::new(move |downloaded, total| {
+                let msg = if let Some(total) = total {
+                    let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
+                    let dl_mb = downloaded as f64 / 1_048_576.0;
+                    let total_mb = total as f64 / 1_048_576.0;
+                    format!("Downloading: {:.1} / {:.1} MB ({}%)", dl_mb, total_mb, pct)
+                } else {
+                    let dl_mb = downloaded as f64 / 1_048_576.0;
+                    format!("Downloading: {:.1} MB", dl_mb)
+                };
+                let _ = progress_sender.send(TaskResult::EpgLoading { progress: msg });
+            }));
+            
+            // Download and parse with retry/resume support
+            match EpgDownloader::download_and_parse(&url, &config, progress_callback) {
+                Ok(epg) => {
+                    let _ = sender.send(TaskResult::EpgLoaded { 
+                        data: Box::new(epg)
+                    });
+                }
+                Err(e) => {
+                    let _ = sender.send(TaskResult::EpgError(e));
+                }
+            }
+        });
+    }
+    
+    fn get_current_program(&self, epg_channel_id: &str) -> Option<&epg_parser::Program> {
+        let epg = self.epg_data.as_ref()?;
+        let offset_secs = (self.epg_time_offset * 3600.0) as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let adjusted_now = now - offset_secs;
+        
+        epg.programs
+            .get(epg_channel_id)?
+            .iter()
+            .find(|p| p.start <= adjusted_now && p.stop > adjusted_now)
     }
 
     fn play_channel(&mut self, channel: &Channel) {
@@ -1496,11 +1672,64 @@ impl eframe::App for IPTVApp {
                     self.log(&exit_msg);
                     self.status_message = stderr;
                 }
+                TaskResult::EpgLoading { progress } => {
+                    self.epg_status = progress.clone();
+                    // Extract percentage from status like "Downloading: 45.2 / 80.0 MB (56%)"
+                    if let Some(start) = progress.rfind('(') {
+                        if let Some(end) = progress.rfind('%') {
+                            if let Ok(pct) = progress[start+1..end].parse::<f32>() {
+                                self.epg_progress = pct / 100.0;
+                            }
+                        }
+                    } else if progress.contains("Parsing") {
+                        self.epg_progress = 0.95; // Parsing is near the end
+                    }
+                }
+                TaskResult::EpgLoaded { data } => {
+                    let channel_count = data.channels.len();
+                    let program_count = data.program_count();
+                    
+                    // Log completion details
+                    self.log("[INFO] ========== EPG LOAD COMPLETE ==========");
+                    self.log(&format!("[INFO] EPG URL: {}", self.epg_url_input));
+                    self.log(&format!("[INFO] Channels parsed: {}", channel_count));
+                    self.log(&format!("[INFO] Programs parsed: {}", program_count));
+                    
+                    // Log any parse errors
+                    if data.parse_error_count > 0 {
+                        self.log(&format!("[WARN] Parse errors encountered: {} (recovered)", data.parse_error_count));
+                        for err in &data.parse_errors {
+                            self.log(&format!("[WARN]   {}", err));
+                        }
+                        if data.parse_error_count > data.parse_errors.len() {
+                            self.log(&format!("[WARN]   ... and {} more errors", 
+                                data.parse_error_count - data.parse_errors.len()));
+                        }
+                    } else {
+                        self.log("[INFO] No parse errors - EPG file was clean");
+                    }
+                    self.log("[INFO] =========================================");
+                    
+                    self.epg_data = Some(data);
+                    self.epg_loading = false;
+                    self.epg_progress = 1.0;
+                    self.epg_last_update = Some(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64);
+                    self.epg_status = format!("Loaded {} channels, {} programs", channel_count, program_count);
+                }
+                TaskResult::EpgError(msg) => {
+                    self.log(&format!("[ERROR] EPG: {}", msg));
+                    self.epg_loading = false;
+                    self.epg_progress = 0.0;
+                    self.epg_status = format!("Error: {}", msg);
+                }
             }
         }
         
         // Request repaint while loading or when player might be outputting
-        if self.loading || self.current_player.is_some() {
+        if self.loading || self.epg_loading || self.current_player.is_some() {
             ctx.request_repaint();
         }
         
@@ -1511,6 +1740,26 @@ impl eframe::App for IPTVApp {
                 self.login();
             } else {
                 self.auto_login_triggered = true;
+            }
+        }
+        
+        // EPG auto-update check
+        if !self.epg_loading && !self.epg_url_input.is_empty() {
+            if let Some(interval_secs) = self.epg_auto_update.as_secs() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                
+                let should_update = match self.epg_last_update {
+                    Some(last) => (now - last) >= interval_secs,
+                    None => self.epg_data.is_none(), // Only auto-load if no data yet
+                };
+                
+                if should_update {
+                    self.log("[INFO] EPG auto-update triggered");
+                    self.load_epg();
+                }
             }
         }
 
@@ -1558,6 +1807,10 @@ impl eframe::App for IPTVApp {
                 
                 if ui.button("🌐 User Agent").clicked() {
                     self.show_user_agent_dialog = true;
+                }
+                
+                if ui.button("📺 EPG").on_hover_text("Load Electronic Program Guide").clicked() {
+                    self.show_epg_dialog = true;
                 }
                 
                 ui.separator();
@@ -1945,6 +2198,165 @@ impl eframe::App for IPTVApp {
                 });
         }
         
+        // EPG Dialog Window
+        if self.show_epg_dialog {
+            egui::Window::new("📺 EPG - Electronic Program Guide")
+                .collapsible(false)
+                .resizable(true)
+                .min_width(450.0)
+                .show(ctx, |ui| {
+                    ui.heading("Load Program Guide");
+                    ui.separator();
+                    
+                    ui.label("Enter XMLTV EPG URL:");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.epg_url_input)
+                            .hint_text("http://provider.com/xmltv.php?username=...&password=...")
+                            .desired_width(350.0));
+                        
+                        let button_text = if self.epg_loading { "⏳" } else { "📥" };
+                        if ui.button(button_text)
+                            .on_hover_text("Load EPG")
+                            .clicked() && !self.epg_loading 
+                        {
+                            self.load_epg();
+                        }
+                        
+                        // Reload button - force re-download
+                        if ui.button("🔄")
+                            .on_hover_text("Force reload EPG")
+                            .clicked() && !self.epg_loading && !self.epg_url_input.is_empty()
+                        {
+                            self.epg_last_update = None; // Reset last update to force reload
+                            self.load_epg();
+                        }
+                    });
+                    
+                    // Auto-update dropdown
+                    ui.horizontal(|ui| {
+                        ui.label("Auto-update:");
+                        egui::ComboBox::from_id_salt("epg_auto_update")
+                            .selected_text(self.epg_auto_update.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Off, "Off");
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Hours6, "6 Hours");
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Hours12, "12 Hours");
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Day1, "1 Day");
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Days2, "2 Days");
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Days3, "3 Days");
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Days4, "4 Days");
+                                ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Days5, "5 Days");
+                            });
+                        
+                        // Show last update time
+                        if let Some(last) = self.epg_last_update {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            let ago = now - last;
+                            let ago_str = if ago < 3600 {
+                                format!("{}m ago", ago / 60)
+                            } else if ago < 86400 {
+                                format!("{}h ago", ago / 3600)
+                            } else {
+                                format!("{}d ago", ago / 86400)
+                            };
+                            ui.label(egui::RichText::new(format!("(Last: {})", ago_str)).small().color(egui::Color32::GRAY));
+                        }
+                    });
+                    
+                    // Time offset slider
+                    ui.horizontal(|ui| {
+                        ui.label("Time Offset:");
+                        if ui.button("−").clicked() {
+                            self.epg_time_offset = (self.epg_time_offset - 0.5).max(-60.0);
+                        }
+                        ui.add(egui::Slider::new(&mut self.epg_time_offset, -60.0..=60.0)
+                            .step_by(0.5)
+                            .show_value(false)
+                            .trailing_fill(true));
+                        if ui.button("+").clicked() {
+                            self.epg_time_offset = (self.epg_time_offset + 0.5).min(60.0);
+                        }
+                        let sign = if self.epg_time_offset >= 0.0 { "+" } else { "" };
+                        ui.label(format!("{}{:.1} hours", sign, self.epg_time_offset));
+                        if self.epg_time_offset != 0.0 {
+                            if ui.small_button("Reset").clicked() {
+                                self.epg_time_offset = 0.0;
+                            }
+                        }
+                    });
+                    
+                    if !self.epg_status.is_empty() {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if self.epg_loading {
+                                ui.spinner();
+                            }
+                            let color = if self.epg_status.starts_with("Error") {
+                                egui::Color32::RED
+                            } else if self.epg_status.starts_with("Loaded") {
+                                egui::Color32::GREEN
+                            } else {
+                                egui::Color32::YELLOW
+                            };
+                            ui.label(egui::RichText::new(&self.epg_status).color(color));
+                        });
+                    }
+                    
+                    if let Some(ref epg) = self.epg_data {
+                        ui.separator();
+                        ui.heading("EPG Statistics");
+                        
+                        egui::Grid::new("epg_stats")
+                            .num_columns(2)
+                            .spacing([20.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Channels:");
+                                ui.label(format!("{}", epg.channels.len()));
+                                ui.end_row();
+                                
+                                ui.label("Programs:");
+                                ui.label(format!("{}", epg.program_count()));
+                                ui.end_row();
+                            });
+                        
+                        ui.separator();
+                        
+                        if ui.button("🗑 Clear EPG Data").clicked() {
+                            self.epg_data = None;
+                            self.epg_last_update = None;
+                            self.epg_status = "EPG data cleared".to_string();
+                            self.log("[INFO] EPG data cleared");
+                        }
+                    }
+                    
+                    ui.separator();
+                    
+                    // Progress section
+                    if self.epg_loading {
+                        ui.label("Downloading and parsing...");
+                        ui.add(egui::ProgressBar::new(self.epg_progress).show_percentage().animate(true));
+                        ui.label(egui::RichText::new(&self.epg_status).color(egui::Color32::YELLOW));
+                    } else if self.epg_status.starts_with("Loaded") {
+                        ui.label(egui::RichText::new("✓ Completed").color(egui::Color32::GREEN).strong());
+                        ui.add(egui::ProgressBar::new(1.0).show_percentage());
+                        ui.label(egui::RichText::new(&self.epg_status).color(egui::Color32::GREEN));
+                    } else if self.epg_status.starts_with("Error") {
+                        ui.label(egui::RichText::new("✗ Failed").color(egui::Color32::RED).strong());
+                        ui.add(egui::ProgressBar::new(0.0).show_percentage());
+                        ui.label(egui::RichText::new(&self.epg_status).color(egui::Color32::RED));
+                    }
+                    
+                    ui.separator();
+                    
+                    if ui.button("Close").clicked() {
+                        self.show_epg_dialog = false;
+                    }
+                });
+        }
+        
         // Internal Player Window
         if self.show_internal_player {
             let mut open = self.show_internal_player;
@@ -2025,7 +2437,33 @@ impl IPTVApp {
                     if ui.button("▶").clicked() {
                         to_play = Some(channel.clone());
                     }
-                    ui.label(&display_name);
+                    
+                    ui.label(egui::RichText::new(&display_name).strong());
+                    
+                    // Show EPG info if available (only for live streams)
+                    if stream_type == "live" {
+                        if let Some(epg_id) = &channel.epg_channel_id {
+                            if let Some(program) = self.get_current_program(epg_id) {
+                                ui.label(" | ");
+                                ui.label(egui::RichText::new(&program.title)
+                                    .color(egui::Color32::LIGHT_BLUE)
+                                    .italics());
+                                
+                                let offset_secs = (self.epg_time_offset * 3600.0) as i64;
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                let adjusted_now = now - offset_secs;
+                                let remaining = (program.stop - adjusted_now) / 60;
+                                if remaining > 0 {
+                                    ui.label(egui::RichText::new(format!("({}m left)", remaining))
+                                        .small()
+                                        .color(egui::Color32::GRAY));
+                                }
+                            }
+                        }
+                    }
                 });
             }
             

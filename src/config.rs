@@ -70,11 +70,19 @@ pub struct AppConfig {
     // Recently watched (stored as JSON)
     #[serde(default)]
     pub recent_watched_json: String,
+    // EPG settings
+    #[serde(default)]
+    pub epg_url: String,
+    #[serde(default = "default_epg_auto_update")]
+    pub epg_auto_update_index: u8,
+    #[serde(default)]
+    pub epg_time_offset: f32,
 }
 
 fn default_buffer() -> u32 { 5 }
 fn default_font_size() -> u32 { 12 }
 fn default_true() -> bool { true }
+fn default_epg_auto_update() -> u8 { 3 } // 1 Day
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -98,6 +106,9 @@ impl Default for AppConfig {
             hw_accel: true,
             favorites_json: String::new(),
             recent_watched_json: String::new(),
+            epg_url: String::new(),
+            epg_auto_update_index: 3, // 1 Day
+            epg_time_offset: 0.0,
         }
     }
 }
