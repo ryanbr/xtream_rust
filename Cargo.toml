@@ -1,0 +1,55 @@
+[package]
+name = "xtreme_iptv"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform IPTV player with Xtream Codes API support"
+license = "MIT"
+authors = ["Xtreme IPTV"]
+
+[features]
+default = []
+internal-player = ["ffmpeg-next"]
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+egui = { version = "0.29", default-features = false, features = ["default_fonts"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+rfd = "0.15"
+chrono = "0.4"
+ffmpeg-next = { version = "7.0", optional = true }
+
+# Platform-specific features
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"
+
+[lints.rust]
+dead_code = "allow"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
+
+# Windows x64 with AVX/AVX2 optimizations (x86-64-v3)
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-s"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static"]
+
+# Linux x64 with AVX/AVX2 optimizations (x86-64-v3)
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

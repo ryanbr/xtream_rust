@@ -1,0 +1,2228 @@
+//! Xtreme IPTV Player - Rust Edition
+//! A cross-platform IPTV player with Xtream Codes API support
+
+// Hide console window on Windows release builds
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::thread;
+use std::io::{BufRead, BufReader};
+use chrono;
+
+mod api;
+mod config;
+mod m3u_parser;
+mod ffmpeg_player;
+
+use api::*;
+use config::*;
+use ffmpeg_player::PlayerWindow;
+
+// Re-export ConnectionQuality for use in main
+
+/// Background task messages
+enum TaskResult {
+    CategoriesLoaded {
+        live: Vec<Category>,
+        movies: Vec<Category>,
+        series: Vec<Category>,
+    },
+    UserInfoLoaded {
+        user_info: UserInfo,
+        server_info: ServerInfo,
+    },
+    ChannelsLoaded(Vec<Channel>),
+    SeriesListLoaded(Vec<SeriesInfo>),
+    SeasonsLoaded(Vec<i32>),
+    EpisodesLoaded(Vec<Episode>),
+    Error(String),
+    PlayerLog(String),
+    PlayerExited { code: Option<i32>, stderr: String },
+}
+
+// Predefined user agents
+const USER_AGENTS: &[(&str, &str)] = &[
+    ("Chrome (Windows)", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"),
+    ("Firefox (Windows)", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"),
+    ("Safari (macOS)", "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"),
+    ("Edge (Windows)", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.3351.83"),
+    ("VLC", "VLC/3.0.16 LibVLC/3.0.16"),
+    ("Kodi", "Kodi/20.2 (Linux; Android 13; SM-G998B) Android/13 Sys_CPU/armv8a App_Bitness/64 Version/20.2-(20.2.0)-Git:20230626-abc123"),
+    ("MX Player", "Dalvik/2.1.0 (Linux; U; Android 13; Pixel 6 Pro Build/TQ2A.230505.002)"),
+    // IPTV Smarters variants
+    ("IPTV Smarters Pro (Simple)", "IPTVSmartersPro"),
+    ("IPTV Smarters Pro (Windows)", "IPTV Smarters Pro/2.2.2.6"),
+    ("IPTV Smarters Pro (macOS)", "IPTV Smarters Pro/2.2.2 (Macintosh; Intel Mac OS X)"),
+    ("IPTV Smarters (iOS)", "IPTV Smarters/1.0.3 (iPad; iOS 16.6.1; Scale/2.00)"),
+    ("IPTV Smarters (Android)", "IPTV Smarters Pro/3.1.5 (Linux; Android 13)"),
+    ("IPTV Smarters (Android TV)", "IPTV Smarters Pro/3.0.8 (Linux; Android 10; Android TV)"),
+    // Other IPTV apps
+    ("TiviMate", "TiviMate/4.7.0 (Linux; Android 13)"),
+    ("TiviMate (Fire TV)", "TiviMate/4.7.0 (Linux; Android 9; AFTT Build/NS6264)"),
+    ("Wink", "Wink/1.31.1"),
+    ("GSE Smart IPTV", "GSE SMART IPTV/8.0 (iOS)"),
+    ("Perfect Player", "PerfectPlayer/1.6.1"),
+    ("XCIPTV", "XCIPTV/5.0.1 (Linux; Android 12)"),
+    ("OTT Navigator", "OTT Navigator/1.6.6 (Linux; Android 11)"),
+    ("Ibo Player", "IboPlayer/1.0 (Linux; Android)"),
+    // Mobile browsers
+    ("Chrome (Android)", "Mozilla/5.0 (Linux; Android 14; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"),
+    ("Firefox (Android)", "Mozilla/5.0 (Android 14; Mobile; rv:126.0) Gecko/126.0 Firefox/126.0"),
+    ("Safari (iOS)", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"),
+    // Smart TV
+    ("Smart TV (Generic)", "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/4.0 Chrome/76.0.3809.146 TV Safari/537.36"),
+    ("Fire TV Stick", "Mozilla/5.0 (Linux; Android 7.1.2; AFTMM Build/NS6264) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.125 Safari/537.36"),
+    ("Android TV", "Mozilla/5.0 (Linux; Android 12; Chromecast) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"),
+    // Linux
+    ("Firefox (Ubuntu)", "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0"),
+    ("Firefox (Fedora)", "Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0"),
+    ("Chrome (ChromeOS)", "Mozilla/5.0 (X11; CrOS x86_64 15633.64.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    ("Samsung Internet", "Mozilla/5.0 (Linux; Android 13; SAMSUNG SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/24.0 Chrome/124.0.0.0 Mobile Safari/537.36"),
+    // Low-level
+    ("OkHttp (IPTV)", "okhttp/4.9.3"),
+    ("Lavf (FFmpeg)", "Lavf/60.3.100"),
+];
+
+fn main() -> Result<(), eframe::Error> {
+    // Force X11 backend on Linux before any windowing code runs
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([900.0, 650.0])
+            .with_min_inner_size([700.0, 500.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Xtreme IPTV Player - Rust Edition",
+        options,
+        Box::new(|cc| {
+            // Add emoji font support
+            let mut fonts = egui::FontDefinitions::default();
+            
+            // Load system emoji fonts
+            #[cfg(target_os = "windows")]
+            {
+                // Try to load Segoe UI Emoji (Windows 10/11)
+                if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\seguiemj.ttf") {
+                    fonts.font_data.insert(
+                        "emoji".to_owned(),
+                        egui::FontData::from_owned(font_data).into(),
+                    );
+                    fonts.families
+                        .entry(egui::FontFamily::Proportional)
+                        .or_default()
+                        .push("emoji".to_owned());
+                }
+            }
+            
+            #[cfg(target_os = "linux")]
+            {
+                // Try common Linux emoji font paths
+                let emoji_paths = [
+                    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                    "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+                    "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                ];
+                
+                for path in emoji_paths {
+                    if let Ok(font_data) = std::fs::read(path) {
+                        fonts.font_data.insert(
+                            "emoji".to_owned(),
+                            egui::FontData::from_owned(font_data).into(),
+                        );
+                        fonts.families
+                            .entry(egui::FontFamily::Proportional)
+                            .or_default()
+                            .push("emoji".to_owned());
+                        break;
+                    }
+                }
+            }
+            
+            #[cfg(target_os = "macos")]
+            {
+                // Try to load Apple Color Emoji
+                if let Ok(font_data) = std::fs::read("/System/Library/Fonts/Apple Color Emoji.ttc") {
+                    fonts.font_data.insert(
+                        "emoji".to_owned(),
+                        egui::FontData::from_owned(font_data).into(),
+                    );
+                    fonts.families
+                        .entry(egui::FontFamily::Proportional)
+                        .or_default()
+                        .push("emoji".to_owned());
+                }
+            }
+            
+            cc.egui_ctx.set_fonts(fonts);
+            
+            // Enable dark mode by default
+            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            Ok(Box::new(IPTVApp::new()))
+        }),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Tab {
+    Live,
+    Movies,
+    Series,
+    Favorites,
+    Info,
+    Console,
+}
+
+#[derive(Debug, Clone)]
+enum NavigationLevel {
+    Categories,
+    Channels(String), // category name
+    Series(String),   // series name
+    Seasons(i64),     // series_id
+    Episodes(i64, i32), // series_id, season_num
+}
+
+#[derive(Debug, Clone)]
+struct Channel {
+    name: String,
+    url: String,
+    stream_id: Option<i64>,
+    category_id: Option<String>,
+    epg_channel_id: Option<String>,
+    stream_icon: Option<String>,
+    series_id: Option<i64>,
+    container_extension: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UserInfo {
+    username: String,
+    password: String,
+    status: String,
+    max_connections: String,
+    active_connections: String,
+    is_trial: bool,
+    expiry: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ServerInfo {
+    url: String,
+    port: String,
+    timezone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct FavoriteItem {
+    name: String,
+    url: String,
+    stream_type: String, // "live", "movie", "series"
+    stream_id: Option<i64>,
+    series_id: Option<i64>,
+    category_name: String,
+    container_extension: Option<String>,
+}
+
+struct IPTVApp {
+    // Login fields
+    server: String,
+    username: String,
+    password: String,
+    
+    // State
+    logged_in: bool,
+    current_tab: Tab,
+    status_message: String,
+    loading: bool,
+    
+    // Background task channel
+    task_receiver: Receiver<TaskResult>,
+    task_sender: Sender<TaskResult>,
+    
+    // Data
+    live_categories: Vec<Category>,
+    movie_categories: Vec<Category>,
+    series_categories: Vec<Category>,
+    
+    current_channels: Vec<Channel>,
+    current_series: Vec<SeriesInfo>,
+    current_seasons: Vec<i32>,
+    current_episodes: Vec<Episode>,
+    
+    // Favorites
+    favorites: Vec<FavoriteItem>,
+    
+    navigation_stack: Vec<NavigationLevel>,
+    
+    // Info
+    user_info: UserInfo,
+    server_info: ServerInfo,
+    
+    // Search
+    search_query: String,
+    
+    // Settings
+    external_player: String,
+    buffer_seconds: u32,
+    connection_quality: ConnectionQuality,
+    dark_mode: bool,
+    use_post_method: bool,
+    save_state: bool,
+    auto_login: bool,
+    auto_login_triggered: bool,
+    
+    // User Agent
+    selected_user_agent: usize,
+    custom_user_agent: String,
+    use_custom_user_agent: bool,
+    pass_user_agent_to_player: bool,
+    show_user_agent_dialog: bool,
+    
+    // Config
+    config: AppConfig,
+    address_book: Vec<SavedCredential>,
+    show_address_book: bool,
+    show_m3u_dialog: bool,
+    m3u_url_input: String,
+    
+    // Add credential dialog
+    show_add_credential: bool,
+    new_cred_name: String,
+    new_cred_server: String,
+    new_cred_username: String,
+    new_cred_password: String,
+    
+    // Console log
+    console_log: Vec<String>,
+    
+    // Player process management
+    single_window_mode: bool,
+    current_player: Option<std::process::Child>,
+    
+    // Hardware acceleration
+    hw_accel: bool,
+    
+    // Internal player
+    use_internal_player: bool,
+    internal_player: PlayerWindow,
+    show_internal_player: bool,
+}
+
+impl Default for IPTVApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IPTVApp {
+    fn new() -> Self {
+        let config = AppConfig::load();
+        let address_book = load_address_book();
+        let (task_sender, task_receiver) = channel();
+        
+        // Load saved credentials if save_state is enabled
+        let (server, username, password) = if config.save_state {
+            (
+                config.saved_server.clone(),
+                config.saved_username.clone(),
+                config.saved_password.clone(),
+            )
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+        
+        // Load favorites from JSON
+        let favorites: Vec<FavoriteItem> = if !config.favorites_json.is_empty() {
+            serde_json::from_str(&config.favorites_json).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        
+        // Extract values before moving config
+        let single_window_mode = config.single_window_mode;
+        let hw_accel = config.hw_accel;
+        
+        Self {
+            server,
+            username,
+            password,
+            logged_in: false,
+            current_tab: Tab::Live,
+            status_message: if config.save_state && config.auto_login { 
+                "Auto-login enabled...".to_string() 
+            } else { 
+                "Ready".to_string() 
+            },
+            loading: false,
+            task_receiver,
+            task_sender,
+            live_categories: Vec::new(),
+            movie_categories: Vec::new(),
+            series_categories: Vec::new(),
+            current_channels: Vec::new(),
+            current_series: Vec::new(),
+            current_seasons: Vec::new(),
+            current_episodes: Vec::new(),
+            favorites,
+            navigation_stack: Vec::new(),
+            user_info: UserInfo::default(),
+            server_info: ServerInfo::default(),
+            search_query: String::new(),
+            external_player: config.external_player.clone(),
+            buffer_seconds: config.buffer_seconds,
+            connection_quality: config.connection_quality,
+            dark_mode: config.dark_mode,
+            use_post_method: false,
+            save_state: config.save_state,
+            auto_login: config.auto_login,
+            auto_login_triggered: false,
+            selected_user_agent: config.selected_user_agent,
+            custom_user_agent: config.custom_user_agent.clone(),
+            use_custom_user_agent: config.use_custom_user_agent,
+            pass_user_agent_to_player: config.pass_user_agent_to_player,
+            show_user_agent_dialog: false,
+            config,
+            address_book,
+            show_address_book: false,
+            show_m3u_dialog: false,
+            m3u_url_input: String::new(),
+            show_add_credential: false,
+            new_cred_name: String::new(),
+            new_cred_server: String::new(),
+            new_cred_username: String::new(),
+            new_cred_password: String::new(),
+            console_log: vec!["[INFO] Xtreme IPTV Player started".to_string()],
+            single_window_mode,
+            current_player: None,
+            hw_accel,
+            use_internal_player: false,
+            internal_player: PlayerWindow::new(),
+            show_internal_player: false,
+        }
+    }
+    
+    fn log(&mut self, message: &str) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.console_log.push(format!("[{}] {}", timestamp, message));
+        // Keep last 500 lines
+        if self.console_log.len() > 500 {
+            self.console_log.remove(0);
+        }
+    }
+    
+    fn save_current_state(&mut self) {
+        self.config.save_state = self.save_state;
+        self.config.auto_login = self.auto_login;
+        self.config.external_player = self.external_player.clone();
+        self.config.buffer_seconds = self.buffer_seconds;
+        self.config.connection_quality = self.connection_quality;
+        self.config.dark_mode = self.dark_mode;
+        self.config.single_window_mode = self.single_window_mode;
+        self.config.hw_accel = self.hw_accel;
+        self.config.selected_user_agent = self.selected_user_agent;
+        self.config.custom_user_agent = self.custom_user_agent.clone();
+        self.config.use_custom_user_agent = self.use_custom_user_agent;
+        self.config.pass_user_agent_to_player = self.pass_user_agent_to_player;
+        
+        // Save favorites
+        self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
+        
+        if self.save_state {
+            self.config.saved_server = self.server.clone();
+            self.config.saved_username = self.username.clone();
+            self.config.saved_password = self.password.clone();
+        } else {
+            self.config.saved_server.clear();
+            self.config.saved_username.clear();
+            self.config.saved_password.clear();
+        }
+        
+        self.config.save();
+        self.status_message = "Settings saved".to_string();
+    }
+    
+    fn is_favorite(&self, url: &str) -> bool {
+        self.favorites.iter().any(|f| f.url == url)
+    }
+    
+    fn toggle_favorite(&mut self, item: FavoriteItem) {
+        if let Some(pos) = self.favorites.iter().position(|f| f.url == item.url) {
+            self.favorites.remove(pos);
+            self.status_message = format!("Removed '{}' from favorites", item.name);
+        } else {
+            self.favorites.push(item.clone());
+            self.status_message = format!("Added '{}' to favorites", item.name);
+        }
+        // Auto-save favorites
+        self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
+        self.config.save();
+    }
+    
+    fn play_favorite(&mut self, fav: &FavoriteItem) {
+        let channel = Channel {
+            name: fav.name.clone(),
+            url: fav.url.clone(),
+            stream_id: fav.stream_id,
+            category_id: None,
+            epg_channel_id: None,
+            stream_icon: None,
+            series_id: fav.series_id,
+            container_extension: fav.container_extension.clone(),
+        };
+        self.play_channel(&channel);
+    }
+    
+    /// Sanitize text by removing unsupported Unicode characters
+    /// Keeps ASCII, common Latin, and replaces unsupported chars with spaces
+    fn sanitize_text(text: &str) -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_ascii() || 
+                   // Common Latin Extended
+                   ('\u{00C0}'..='\u{00FF}').contains(&c) ||
+                   ('\u{0100}'..='\u{017F}').contains(&c) ||
+                   // Common punctuation and symbols that egui supports
+                   c == '\u{00B0}' || c == '\u{2122}' || c == '\u{00A9}' || c == '\u{00AE}' ||
+                   c == '\u{2013}' || c == '\u{2014}' || c == '\u{2019}' || c == '\u{201C}' || c == '\u{201D}' ||
+                   c == '\u{2026}' || c == '\u{2022}' {
+                    c
+                } else {
+                    ' ' // Replace unsupported chars with space
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ") // Collapse multiple spaces
+    }
+
+    fn get_effective_buffer(&self) -> u32 {
+        self.connection_quality.buffer_seconds(self.buffer_seconds)
+    }
+
+    fn get_user_agent(&self) -> String {
+        if self.use_custom_user_agent && !self.custom_user_agent.is_empty() {
+            self.custom_user_agent.clone()
+        } else if self.selected_user_agent < USER_AGENTS.len() {
+            USER_AGENTS[self.selected_user_agent].1.to_string()
+        } else {
+            USER_AGENTS[0].1.to_string()
+        }
+    }
+
+    fn login(&mut self) {
+        if self.server.is_empty() || self.username.is_empty() || self.password.is_empty() {
+            self.status_message = "Please fill all fields".to_string();
+            return;
+        }
+
+        self.status_message = "Logging in...".to_string();
+        self.loading = true;
+        
+        self.log(&format!("[INFO] Attempting login to {}", self.server));
+        self.log(&format!("[INFO] User Agent: {}", self.get_user_agent()));
+
+        // Ensure server has protocol
+        if !self.server.starts_with("http://") && !self.server.starts_with("https://") {
+            self.server = format!("http://{}", self.server);
+        }
+
+        // Spawn background thread for login
+        let server = self.server.clone();
+        let username = self.username.clone();
+        let password = self.password.clone();
+        let user_agent = self.get_user_agent();
+        let sender = self.task_sender.clone();
+
+        thread::spawn(move || {
+            let client = XtreamClient::new(&server, &username, &password)
+                .with_user_agent(&user_agent);
+
+            // Fetch categories in parallel
+            let live_handle = {
+                let client = XtreamClient::new(&server, &username, &password)
+                    .with_user_agent(&user_agent);
+                thread::spawn(move || client.get_live_categories())
+            };
+            
+            let movies_handle = {
+                let client = XtreamClient::new(&server, &username, &password)
+                    .with_user_agent(&user_agent);
+                thread::spawn(move || client.get_vod_categories())
+            };
+            
+            let series_handle = {
+                let client = XtreamClient::new(&server, &username, &password)
+                    .with_user_agent(&user_agent);
+                thread::spawn(move || client.get_series_categories())
+            };
+
+            // Wait for all to complete and collect errors
+            let live_result = live_handle.join();
+            let movies_result = movies_handle.join();
+            let series_result = series_handle.join();
+            
+            // Check for thread panics
+            let live = match live_result {
+                Ok(Ok(data)) => Some(data),
+                Ok(Err(e)) => {
+                    let _ = sender.send(TaskResult::Error(format!("Live categories: {}", e)));
+                    return;
+                }
+                Err(_) => {
+                    let _ = sender.send(TaskResult::Error("Live categories thread panicked".to_string()));
+                    return;
+                }
+            };
+            
+            let movies = match movies_result {
+                Ok(Ok(data)) => Some(data),
+                Ok(Err(e)) => {
+                    let _ = sender.send(TaskResult::Error(format!("Movie categories: {}", e)));
+                    return;
+                }
+                Err(_) => {
+                    let _ = sender.send(TaskResult::Error("Movie categories thread panicked".to_string()));
+                    return;
+                }
+            };
+            
+            let series = match series_result {
+                Ok(Ok(data)) => Some(data),
+                Ok(Err(e)) => {
+                    let _ = sender.send(TaskResult::Error(format!("Series categories: {}", e)));
+                    return;
+                }
+                Err(_) => {
+                    let _ = sender.send(TaskResult::Error("Series categories thread panicked".to_string()));
+                    return;
+                }
+            };
+
+            if let (Some(live), Some(movies), Some(series)) = (live, movies, series) {
+                let _ = sender.send(TaskResult::CategoriesLoaded { live, movies, series });
+                
+                // Also fetch user info
+                if let Ok(info) = client.get_account_info() {
+                    let mut user_info = UserInfo::default();
+                    let mut server_info = ServerInfo::default();
+                    
+                    if let Some(user) = info.get("user_info") {
+                        user_info.username = user.get("username")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        user_info.password = user.get("password")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        user_info.status = user.get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        user_info.max_connections = user.get("max_connections")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unlimited")
+                            .to_string();
+                        user_info.active_connections = user.get("active_cons")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0")
+                            .to_string();
+                        user_info.is_trial = user.get("is_trial")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "1")
+                            .unwrap_or(false);
+                        
+                        if let Some(exp) = user.get("exp_date").and_then(|v| v.as_str()) {
+                            if let Ok(ts) = exp.parse::<i64>() {
+                                user_info.expiry = format_timestamp(ts);
+                            } else {
+                                user_info.expiry = "Unlimited".to_string();
+                            }
+                        }
+                    }
+
+                    if let Some(srv) = info.get("server_info") {
+                        server_info.url = srv.get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        server_info.port = srv.get("port")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("80")
+                            .to_string();
+                        server_info.timezone = srv.get("timezone")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                    }
+                    
+                    let _ = sender.send(TaskResult::UserInfoLoaded { user_info, server_info });
+                }
+            }
+        });
+    }
+
+    fn fetch_channels(&mut self, category_id: &str, stream_type: &str) {
+        self.loading = true;
+        self.status_message = "Loading channels...".to_string();
+        
+        let server = self.server.clone();
+        let username = self.username.clone();
+        let password = self.password.clone();
+        let user_agent = self.get_user_agent();
+        let category_id = category_id.to_string();
+        let stream_type = stream_type.to_string();
+        let sender = self.task_sender.clone();
+
+        thread::spawn(move || {
+            let client = XtreamClient::new(&server, &username, &password)
+                .with_user_agent(&user_agent);
+            
+            let result = match stream_type.as_str() {
+                "live" => client.get_live_streams(&category_id),
+                "movie" => client.get_vod_streams(&category_id),
+                _ => return,
+            };
+
+            if let Ok(streams) = result {
+                let channels: Vec<Channel> = streams.into_iter().map(|s| {
+                    let ext = s.container_extension.as_deref().unwrap_or(
+                        if stream_type == "live" { "ts" } else { "mp4" }
+                    );
+                    let url = format!(
+                        "{}/{}/{}/{}/{}.{}",
+                        server, stream_type, username, password,
+                        s.stream_id, ext
+                    );
+                    
+                    Channel {
+                        name: s.name,
+                        url,
+                        stream_id: Some(s.stream_id),
+                        category_id: s.category_id,
+                        epg_channel_id: s.epg_channel_id,
+                        stream_icon: s.stream_icon,
+                        series_id: None,
+                        container_extension: s.container_extension,
+                    }
+                }).collect();
+                
+                let _ = sender.send(TaskResult::ChannelsLoaded(channels));
+            } else {
+                let _ = sender.send(TaskResult::Error("Failed to load channels".to_string()));
+            }
+        });
+    }
+
+    fn fetch_series_list(&mut self, category_id: &str) {
+        self.loading = true;
+        self.status_message = "Loading series...".to_string();
+        
+        let server = self.server.clone();
+        let username = self.username.clone();
+        let password = self.password.clone();
+        let user_agent = self.get_user_agent();
+        let category_id = category_id.to_string();
+        let sender = self.task_sender.clone();
+
+        thread::spawn(move || {
+            let client = XtreamClient::new(&server, &username, &password)
+                .with_user_agent(&user_agent);
+            
+            if let Ok(series) = client.get_series(&category_id) {
+                let _ = sender.send(TaskResult::SeriesListLoaded(series));
+            } else {
+                let _ = sender.send(TaskResult::Error("Failed to load series".to_string()));
+            }
+        });
+    }
+
+    fn fetch_series_info(&mut self, series_id: i64) {
+        self.loading = true;
+        self.status_message = "Loading seasons...".to_string();
+        
+        let server = self.server.clone();
+        let username = self.username.clone();
+        let password = self.password.clone();
+        let user_agent = self.get_user_agent();
+        let sender = self.task_sender.clone();
+
+        thread::spawn(move || {
+            let client = XtreamClient::new(&server, &username, &password)
+                .with_user_agent(&user_agent);
+            
+            if let Ok(info) = client.get_series_info(series_id) {
+                if let Some(episodes) = info.get("episodes") {
+                    if let Some(obj) = episodes.as_object() {
+                        let mut seasons: Vec<i32> = obj.keys()
+                            .filter_map(|k| k.parse::<i32>().ok())
+                            .collect();
+                        seasons.sort();
+                        let _ = sender.send(TaskResult::SeasonsLoaded(seasons));
+                        return;
+                    }
+                }
+                let _ = sender.send(TaskResult::Error("No seasons found".to_string()));
+            } else {
+                let _ = sender.send(TaskResult::Error("Failed to load series info".to_string()));
+            }
+        });
+    }
+
+    fn fetch_episodes(&mut self, series_id: i64, season: i32) {
+        self.loading = true;
+        self.status_message = "Loading episodes...".to_string();
+        
+        let server = self.server.clone();
+        let username = self.username.clone();
+        let password = self.password.clone();
+        let user_agent = self.get_user_agent();
+        let sender = self.task_sender.clone();
+
+        thread::spawn(move || {
+            let client = XtreamClient::new(&server, &username, &password)
+                .with_user_agent(&user_agent);
+            
+            if let Ok(info) = client.get_series_info(series_id) {
+                if let Some(episodes) = info.get("episodes") {
+                    if let Some(season_eps) = episodes.get(&season.to_string()) {
+                        if let Some(arr) = season_eps.as_array() {
+                            let eps: Vec<Episode> = arr.iter().filter_map(|ep| {
+                                let id = ep.get("id")?.as_str()?.parse().ok()?;
+                                let title = ep.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string();
+                                let episode_num = ep.get("episode_num")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0) as i32;
+                                let container = ep.get("container_extension")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("mp4")
+                                    .to_string();
+                                
+                                Some(Episode {
+                                    id,
+                                    title,
+                                    episode_num,
+                                    season,
+                                    container_extension: container,
+                                })
+                            }).collect();
+                            
+                            let _ = sender.send(TaskResult::EpisodesLoaded(eps));
+                            return;
+                        }
+                    }
+                }
+                let _ = sender.send(TaskResult::Error("No episodes found".to_string()));
+            } else {
+                let _ = sender.send(TaskResult::Error("Failed to load episodes".to_string()));
+            }
+        });
+    }
+
+    fn play_channel(&mut self, channel: &Channel) {
+        // Use internal player if enabled OR if user typed "internal" in player field
+        let player_lower = self.external_player.to_lowercase();
+        let use_internal = self.use_internal_player || player_lower == "internal";
+        
+        if use_internal {
+            return self.play_channel_internal(channel);
+        }
+        
+        // Kill existing player if in single window mode
+        if self.single_window_mode {
+            if let Some(ref mut child) = self.current_player {
+                let _ = child.kill();
+                let _ = child.wait(); // Reap the process
+            }
+            self.current_player = None;
+            self.log("[PLAY] Single window mode - closing previous player");
+        }
+        
+        let player = if self.external_player.is_empty() {
+            "ffplay".to_string()
+        } else {
+            self.external_player.clone()
+        };
+        
+        // Auto-detect player paths on Windows
+        #[cfg(target_os = "windows")]
+        let player = {
+            let p = player;
+            let p_lower = p.to_lowercase();
+            
+            if p_lower == "vlc" || p_lower == "vlc.exe" {
+                // Check common VLC installation paths
+                let paths = [
+                    r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+                    r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+                ];
+                paths.iter()
+                    .find(|path| std::path::Path::new(path).exists())
+                    .map(|s| s.to_string())
+                    .unwrap_or(p)
+            } else if p_lower == "mpv" || p_lower == "mpv.exe" {
+                let paths = [
+                    r"C:\Program Files\mpv\mpv.exe",
+                    r"C:\Program Files (x86)\mpv\mpv.exe",
+                    r"C:\mpv\mpv.exe",
+                ];
+                paths.iter()
+                    .find(|path| std::path::Path::new(path).exists())
+                    .map(|s| s.to_string())
+                    .unwrap_or(p)
+            } else if p_lower == "ffplay" || p_lower == "ffplay.exe" {
+                let paths = [
+                    r"C:\ffmpeg\bin\ffplay.exe",
+                    r"C:\Program Files\ffmpeg\bin\ffplay.exe",
+                ];
+                paths.iter()
+                    .find(|path| std::path::Path::new(path).exists())
+                    .map(|s| s.to_string())
+                    .unwrap_or(p)
+            } else {
+                p
+            }
+        };
+        
+        #[cfg(not(target_os = "windows"))]
+        let player = player;
+        
+        self.log(&format!("[PLAY] {} | Player: {}", Self::sanitize_text(&channel.name), player));
+        self.log(&format!("[PLAY] URL: {}", channel.url));
+
+        let player_lower = player.to_lowercase();
+        let mut cmd = Command::new(&player);
+        
+        // Get effective buffer based on connection quality
+        let buffer_secs = self.get_effective_buffer();
+        let buffer_ms = (buffer_secs * 1000) as i64;
+        let buffer_bytes = (buffer_secs as i64) * 1024 * 1024; // ~1MB per second
+        let buffer_bytes_large = buffer_bytes * 4; // Larger buffer for probing
+        let is_slow = matches!(self.connection_quality, ConnectionQuality::Slow | ConnectionQuality::VerySlow);
+        
+        self.log(&format!("[PLAY] Buffer: {}s | Connection: {:?} | HW Accel: {}", buffer_secs, self.connection_quality, if self.hw_accel { "On" } else { "Off" }));
+        
+        if player_lower.contains("ffplay") {
+            // FFplay buffer settings - aggressive for IPTV
+            let mut args = vec![
+                "-i".to_string(), channel.url.clone(),
+                "-autoexit".to_string(),
+                
+                // === BUFFERING (most important) ===
+                "-probesize".to_string(), format!("{}", buffer_bytes_large),
+                "-analyzeduration".to_string(), format!("{}", buffer_ms * 2000), // microseconds, 2x buffer
+                
+                // === STREAM FLAGS ===
+                "-fflags".to_string(), "+genpts+discardcorrupt+igndts+nobuffer".to_string(),
+                "-flags".to_string(), "low_delay".to_string(),
+                
+                // === BUFFER SIZES ===
+                "-rtbufsize".to_string(), format!("{}M", buffer_secs * 4),
+                "-max_delay".to_string(), format!("{}", buffer_ms * 1000),
+                "-reorder_queue_size".to_string(), format!("{}", buffer_secs * 100),
+                
+                // === SYNC OPTIONS ===
+                "-sync".to_string(), "audio".to_string(),
+                "-framedrop".to_string(),
+                "-avioflags".to_string(), "direct".to_string(),
+                
+                // === THREADS ===
+                "-threads".to_string(), "0".to_string(), // Auto
+                
+                // Window title
+                "-window_title".to_string(), channel.name.clone(),
+            ];
+            
+            // Add reconnect options for HTTP streams
+            if channel.url.starts_with("http") {
+                args.extend([
+                    "-reconnect".to_string(), "1".to_string(),
+                    "-reconnect_streamed".to_string(), "1".to_string(),
+                    "-reconnect_at_eof".to_string(), "1".to_string(),
+                    "-reconnect_delay_max".to_string(), if is_slow { "30".to_string() } else { "10".to_string() },
+                    // Timeout settings
+                    "-timeout".to_string(), format!("{}", buffer_ms * 2000), // microseconds
+                    "-rw_timeout".to_string(), format!("{}", buffer_ms * 2000),
+                ]);
+            }
+            
+            // Slow connection optimizations
+            if is_slow {
+                args.extend([
+                    "-infbuf".to_string(),  // Infinite buffer mode
+                    "-fflags".to_string(), "+genpts+discardcorrupt+igndts".to_string(),
+                    "-err_detect".to_string(), "ignore_err".to_string(),
+                    "-ec".to_string(), "favor_inter".to_string(), // Error concealment
+                ]);
+            }
+            
+            // User agent (optional)
+            if self.pass_user_agent_to_player {
+                args.extend([
+                    "-user_agent".to_string(), self.get_user_agent(),
+                ]);
+            }
+            
+            // Hardware acceleration
+            if self.hw_accel {
+                args.insert(0, "auto".to_string());
+                args.insert(0, "-hwaccel".to_string());
+            }
+            
+            for arg in args {
+                cmd.arg(arg);
+            }
+        } else if player_lower.contains("mpv") {
+            // MPV buffer settings - aggressive for IPTV
+            let cache_secs = buffer_secs * 2; // Double cache
+            let cache_mb = buffer_secs * 4;   // 4MB per buffer second
+            
+            let mut args = vec![
+                channel.url.clone(),
+                format!("--title={}", channel.name),
+                
+                // === CACHE SETTINGS (most important) ===
+                "--cache=yes".to_string(),
+                format!("--cache-secs={}", cache_secs),
+                format!("--demuxer-readahead-secs={}", cache_secs),
+                format!("--demuxer-max-bytes={}M", cache_mb),
+                format!("--demuxer-max-back-bytes={}M", cache_mb / 2),
+                "--cache-pause=yes".to_string(),
+                format!("--cache-pause-wait={}", buffer_secs),
+                "--cache-pause-initial=yes".to_string(),
+                
+                // === NETWORK OPTIONS ===
+                format!("--network-timeout={}", if is_slow { 120 } else { 60 }),
+                "--stream-lavf-o=reconnect=1".to_string(),
+                "--stream-lavf-o=reconnect_streamed=1".to_string(),
+                "--stream-lavf-o=reconnect_delay_max=30".to_string(),
+                format!("--stream-buffer-size={}MiB", buffer_secs * 2),
+                
+                // === DEMUXER OPTIONS ===
+                "--demuxer-lavf-probe-info=yes".to_string(),
+                format!("--demuxer-lavf-analyzeduration={}", buffer_ms / 1000),
+                format!("--demuxer-lavf-probesize={}", buffer_bytes_large),
+                "--demuxer-lavf-o=fflags=+genpts+discardcorrupt".to_string(),
+                
+                // === PLAYBACK OPTIONS ===
+                "--keep-open=yes".to_string(),
+                "--force-seekable=yes".to_string(),
+                "--hr-seek=yes".to_string(),
+                "--reset-on-next-file=pause".to_string(),
+                
+                // === VIDEO/AUDIO SYNC ===
+                "--video-sync=audio".to_string(),
+                "--interpolation=no".to_string(),
+                
+                // === ERROR HANDLING ===
+                "--ytdl=no".to_string(), // Don't use youtube-dl
+            ];
+            
+            // Hardware acceleration
+            if self.hw_accel {
+                args.push("--hwdec=auto-safe".to_string());
+                args.push("--vo=gpu".to_string());
+            } else {
+                args.push("--hwdec=no".to_string());
+            }
+            
+            // User agent
+            if self.pass_user_agent_to_player {
+                args.push(format!("--user-agent={}", self.get_user_agent()));
+            }
+            
+            // Slow connection optimizations
+            if is_slow {
+                args.extend([
+                    "--vd-lavc-threads=0".to_string(),        // Auto threads
+                    "--vd-lavc-skiploopfilter=all".to_string(), // Skip loop filter
+                    "--vd-lavc-skipframe=nonref".to_string(), // Skip non-reference frames
+                    "--framedrop=vo".to_string(),             // Drop frames at VO
+                    "--video-latency-hacks=yes".to_string(),  // Latency hacks
+                    "--untimed=no".to_string(),
+                    "--audio-buffer=1".to_string(),           // Larger audio buffer
+                ]);
+            } else {
+                args.extend([
+                    "--framedrop=no".to_string(),
+                ]);
+            }
+            
+            for arg in args {
+                cmd.arg(arg);
+            }
+        } else if player_lower.contains("vlc") {
+            // VLC buffer settings - simple and reliable
+            let cache_ms = buffer_ms * 2;
+            
+            let mut args = vec![
+                channel.url.clone(),
+                format!("--network-caching={}", cache_ms),
+                format!("--live-caching={}", cache_ms),
+                "--http-reconnect".to_string(),
+            ];
+            
+            // Hardware acceleration
+            if self.hw_accel {
+                args.push("--avcodec-hw=any".to_string());
+            }
+            
+            // User agent
+            if self.pass_user_agent_to_player {
+                args.push(format!("--http-user-agent={}", self.get_user_agent()));
+            }
+            
+            for arg in args {
+                cmd.arg(arg);
+            }
+        } else if player_lower.contains("potplayer") {
+            // PotPlayer (Windows) - doesn't use user agent arg
+            cmd.arg(&channel.url);
+        } else if player_lower.contains("mpc-hc") || player_lower.contains("mpc-be") {
+            // MPC-HC / MPC-BE (Windows) - doesn't support user agent arg
+            cmd.arg(&channel.url);
+        } else if player_lower.contains("mplayer") {
+            // MPlayer settings
+            let cache_min = if is_slow { "50" } else { "20" };
+            let mut args = vec![
+                channel.url.clone(),
+                "-cache".to_string(), format!("{}", buffer_secs * 1024),
+                "-cache-min".to_string(), cache_min.to_string(),
+                "-title".to_string(), channel.name.clone(),
+            ];
+            
+            if self.pass_user_agent_to_player {
+                args.extend(["-user-agent".to_string(), self.get_user_agent()]);
+            }
+            
+            for arg in args {
+                cmd.arg(arg);
+            }
+        } else if player_lower.contains("celluloid") || player_lower.contains("gnome-mpv") {
+            // Celluloid (GNOME MPV frontend) - passes args to mpv
+            cmd.args([
+                &channel.url,
+                &format!("--mpv-cache-secs={}", buffer_secs),
+            ]);
+        } else {
+            // Generic player - just pass URL (no user agent, might not be supported)
+            cmd.arg(&channel.url);
+        }
+
+        // Set user agent environment variable for some players
+        cmd.env("USER_AGENT", self.get_user_agent());
+        
+        // Capture stderr for error logging
+        cmd.stderr(Stdio::piped());
+        cmd.stdout(Stdio::null()); // Ignore stdout
+
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let pid = child.id();
+                self.log(&format!("[PLAY] Player launched successfully (PID: {})", pid));
+                
+                // Take stderr before potentially moving child
+                let stderr = child.stderr.take();
+                
+                // Spawn stderr reader thread
+                if let Some(stderr) = stderr {
+                    let sender = self.task_sender.clone();
+                    thread::spawn(move || {
+                        let reader = BufReader::new(stderr);
+                        for line in reader.lines() {
+                            if let Ok(line) = line {
+                                if !line.trim().is_empty() {
+                                    let _ = sender.send(TaskResult::PlayerLog(format!("[PLAYER] {}", line)));
+                                }
+                            }
+                        }
+                    });
+                }
+                
+                if self.single_window_mode {
+                    self.current_player = Some(child);
+                } else {
+                    // Spawn monitoring thread for non-single-window mode to track exit
+                    let sender = self.task_sender.clone();
+                    let channel_name = channel.name.clone();
+                    thread::spawn(move || {
+                        // Wait for process and get exit code
+                        match child.wait() {
+                            Ok(status) => {
+                                if !status.success() {
+                                    let _ = sender.send(TaskResult::PlayerExited {
+                                        code: status.code(),
+                                        stderr: format!("Player exited with error for '{}'", channel_name),
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                let _ = sender.send(TaskResult::PlayerLog(format!("[ERROR] Failed to wait for player: {}", e)));
+                            }
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                self.log(&format!("[ERROR] Failed to launch player '{}': {}", player, e));
+                eprintln!("Failed to launch player '{}': {}", player, e);
+            }
+        }
+    }
+    
+    /// Play using internal FFmpeg player
+    fn play_channel_internal(&mut self, channel: &Channel) {
+        self.log(&format!("[PLAY] {} | Internal Player", Self::sanitize_text(&channel.name)));
+        self.log(&format!("[PLAY] URL: {}", channel.url));
+        
+        let buffer_secs = self.get_effective_buffer();
+        let user_agent = self.get_user_agent();
+        
+        self.internal_player.play(&channel.name, &channel.url, buffer_secs, &user_agent);
+        self.show_internal_player = true;
+    }
+
+    fn play_episode(&mut self, episode: &Episode, series_id: i64) {
+        let url = format!(
+            "{}/series/{}/{}/{}.{}",
+            self.server, self.username, self.password,
+            episode.id, episode.container_extension
+        );
+        
+        let channel = Channel {
+            name: episode.title.clone(),
+            url,
+            stream_id: None,
+            category_id: None,
+            epg_channel_id: None,
+            stream_icon: None,
+            series_id: Some(series_id),
+            container_extension: Some(episode.container_extension.clone()),
+        };
+        
+        self.play_channel(&channel);
+    }
+
+    fn go_back(&mut self) {
+        if self.navigation_stack.pop().is_some() {
+            // Handle what to show based on remaining stack
+            if let Some(level) = self.navigation_stack.last() {
+                match level {
+                    NavigationLevel::Categories => {
+                        self.current_channels.clear();
+                        self.current_series.clear();
+                    }
+                    NavigationLevel::Channels(_cat) => {
+                        // Refetch channels
+                    }
+                    _ => {}
+                }
+            } else {
+                self.current_channels.clear();
+                self.current_series.clear();
+                self.current_seasons.clear();
+                self.current_episodes.clear();
+            }
+        }
+        self.search_query.clear();
+    }
+
+    fn extract_m3u_credentials(&mut self, url: &str) {
+        // Parse m3u_plus URL format:
+        // http://server.com/get.php?username=XXX&password=YYY&type=m3u_plus
+        if let Some(query_start) = url.find('?') {
+            let query = &url[query_start + 1..];
+            let mut params: HashMap<&str, &str> = HashMap::new();
+            
+            for pair in query.split('&') {
+                if let Some((key, value)) = pair.split_once('=') {
+                    params.insert(key, value);
+                }
+            }
+            
+            if let (Some(&user), Some(&pass)) = (params.get("username"), params.get("password")) {
+                self.username = user.to_string();
+                self.password = pass.to_string();
+                
+                // Extract server
+                if let Some(proto_end) = url.find("://") {
+                    let rest = &url[proto_end + 3..];
+                    if let Some(path_start) = rest.find('/') {
+                        self.server = url[..proto_end + 3 + path_start].to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    fn save_credential(&mut self) {
+        if self.new_cred_name.is_empty() {
+            return;
+        }
+
+        let cred = SavedCredential {
+            name: self.new_cred_name.clone(),
+            server: self.new_cred_server.clone(),
+            username: self.new_cred_username.clone(),
+            password: self.new_cred_password.clone(),
+        };
+
+        self.address_book.push(cred);
+        save_address_book(&self.address_book);
+
+        // Clear form
+        self.new_cred_name.clear();
+        self.new_cred_server.clear();
+        self.new_cred_username.clear();
+        self.new_cred_password.clear();
+        self.show_add_credential = false;
+    }
+
+    fn load_credential(&mut self, cred: &SavedCredential) {
+        self.server = cred.server.clone();
+        self.username = cred.username.clone();
+        self.password = cred.password.clone();
+        self.show_address_book = false;
+    }
+
+    fn delete_credential(&mut self, index: usize) {
+        if index < self.address_book.len() {
+            self.address_book.remove(index);
+            save_address_book(&self.address_book);
+        }
+    }
+}
+
+impl eframe::App for IPTVApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Process background task results (non-blocking)
+        while let Ok(result) = self.task_receiver.try_recv() {
+            match result {
+                TaskResult::CategoriesLoaded { live, movies, series } => {
+                    self.log(&format!("[INFO] Login successful - Live: {}, Movies: {}, Series: {} categories", 
+                        live.len(), movies.len(), series.len()));
+                    self.live_categories = live;
+                    self.movie_categories = movies;
+                    self.series_categories = series;
+                    self.logged_in = true;
+                    self.loading = false;
+                    self.status_message = "Logged in successfully".to_string();
+                }
+                TaskResult::UserInfoLoaded { user_info, server_info } => {
+                    self.log(&format!("[INFO] User: {} | Status: {} | Expiry: {}", 
+                        user_info.username, user_info.status, user_info.expiry));
+                    self.user_info = user_info;
+                    self.server_info = server_info;
+                }
+                TaskResult::ChannelsLoaded(channels) => {
+                    self.log(&format!("[INFO] Loaded {} channels", channels.len()));
+                    self.current_channels = channels;
+                    self.loading = false;
+                    self.status_message = format!("Loaded {} channels", self.current_channels.len());
+                }
+                TaskResult::SeriesListLoaded(series) => {
+                    self.log(&format!("[INFO] Loaded {} series", series.len()));
+                    self.current_series = series;
+                    self.loading = false;
+                    self.status_message = format!("Loaded {} series", self.current_series.len());
+                }
+                TaskResult::SeasonsLoaded(seasons) => {
+                    self.log(&format!("[INFO] Loaded {} seasons", seasons.len()));
+                    self.current_seasons = seasons;
+                    self.loading = false;
+                    self.status_message = format!("Loaded {} seasons", self.current_seasons.len());
+                }
+                TaskResult::EpisodesLoaded(episodes) => {
+                    self.log(&format!("[INFO] Loaded {} episodes", episodes.len()));
+                    self.current_episodes = episodes;
+                    self.loading = false;
+                    self.status_message = format!("Loaded {} episodes", self.current_episodes.len());
+                }
+                TaskResult::Error(msg) => {
+                    self.log(&format!("[ERROR] {}", msg));
+                    self.loading = false;
+                    self.status_message = format!("Error: {}", msg);
+                }
+                TaskResult::PlayerLog(msg) => {
+                    self.log(&msg);
+                }
+                TaskResult::PlayerExited { code, stderr } => {
+                    let exit_msg = match code {
+                        Some(c) => format!("[WARN] Player exited with code {}: {}", c, stderr),
+                        None => format!("[WARN] Player terminated by signal: {}", stderr),
+                    };
+                    self.log(&exit_msg);
+                    self.status_message = stderr;
+                }
+            }
+        }
+        
+        // Request repaint while loading or when player might be outputting
+        if self.loading || self.current_player.is_some() {
+            ctx.request_repaint();
+        }
+        
+        // Auto-login on startup if enabled
+        if self.save_state && self.auto_login && !self.auto_login_triggered && !self.logged_in && !self.loading {
+            if !self.server.is_empty() && !self.username.is_empty() && !self.password.is_empty() {
+                self.auto_login_triggered = true;
+                self.login();
+            } else {
+                self.auto_login_triggered = true;
+            }
+        }
+
+        // Apply theme
+        if self.dark_mode {
+            ctx.set_visuals(egui::Visuals::dark());
+        } else {
+            ctx.set_visuals(egui::Visuals::light());
+        }
+
+        // Top panel - Login controls
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.add_space(5.0);
+            
+            ui.horizontal(|ui| {
+                ui.label("Server:");
+                ui.add(egui::TextEdit::singleline(&mut self.server)
+                    .hint_text("http://server.com:port")
+                    .desired_width(180.0));
+                
+                ui.label("Username:");
+                ui.add(egui::TextEdit::singleline(&mut self.username)
+                    .hint_text("username")
+                    .desired_width(100.0));
+                
+                ui.label("Password:");
+                ui.add(egui::TextEdit::singleline(&mut self.password)
+                    .password(true)
+                    .hint_text("password")
+                    .desired_width(100.0));
+                
+                if ui.button("🔑 Login").clicked() {
+                    self.login();
+                }
+            });
+
+            ui.horizontal(|ui| {
+                if ui.button("📚 Address Book").clicked() {
+                    self.show_address_book = true;
+                }
+                
+                if ui.button("📋 M3U URL").clicked() {
+                    self.show_m3u_dialog = true;
+                }
+                
+                if ui.button("🌐 User Agent").clicked() {
+                    self.show_user_agent_dialog = true;
+                }
+                
+                ui.separator();
+                
+                ui.checkbox(&mut self.use_post_method, "Use POST");
+                ui.checkbox(&mut self.dark_mode, "🌙 Dark");
+                ui.checkbox(&mut self.single_window_mode, "Single Window")
+                    .on_hover_text("Close previous player when opening new stream");
+                
+                ui.separator();
+                
+                ui.checkbox(&mut self.save_state, "💾 Save State")
+                    .on_hover_text("Remember server, username, password, and settings");
+                
+                if self.save_state {
+                    ui.checkbox(&mut self.auto_login, "Auto-Login")
+                        .on_hover_text("Automatically login when app starts");
+                }
+                
+                if ui.button("💾 Save").on_hover_text("Save current settings").clicked() {
+                    self.save_current_state();
+                }
+            });
+            
+            ui.horizontal(|ui| {
+                ui.label("🎬 Player:");
+                ui.add(egui::TextEdit::singleline(&mut self.external_player)
+                    .hint_text("mpv, vlc, ffplay, internal...")
+                    .desired_width(200.0))
+                    .on_hover_text("Enter media player command/path:\n• mpv\n• vlc\n• ffplay\n• internal (built-in player)\n• /usr/bin/mpv\n• C:\\Program Files\\VLC\\vlc.exe\n\nLeave empty for ffplay (default)");
+                
+                if ui.button("📁").on_hover_text("Browse for player executable").clicked() {
+                    #[cfg(target_os = "windows")]
+                    {
+                        // Native Windows file dialog
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Select Media Player")
+                            .add_filter("Executables", &["exe", "com", "bat", "cmd"])
+                            .add_filter("All Files", &["*"])
+                            .pick_file() 
+                        {
+                            self.external_player = path.display().to_string();
+                        }
+                    }
+                    
+                    #[cfg(target_os = "linux")]
+                    {
+                        // Try zenity first (GTK), then kdialog (KDE), then rfd
+                        let mut found = false;
+                        
+                        if let Ok(output) = std::process::Command::new("zenity")
+                            .args(["--file-selection", "--title=Select Media Player"])
+                            .output()
+                        {
+                            if output.status.success() {
+                                if let Ok(path) = String::from_utf8(output.stdout) {
+                                    let path = path.trim();
+                                    if !path.is_empty() {
+                                        self.external_player = path.to_string();
+                                        found = true;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if !found {
+                            if let Ok(output) = std::process::Command::new("kdialog")
+                                .args(["--getopenfilename", ".", "All Files (*)"])
+                                .output()
+                            {
+                                if output.status.success() {
+                                    if let Ok(path) = String::from_utf8(output.stdout) {
+                                        let path = path.trim();
+                                        if !path.is_empty() {
+                                            self.external_player = path.to_string();
+                                            found = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Fallback to rfd if available
+                        if !found {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Select Media Player")
+                                .pick_file() 
+                            {
+                                self.external_player = path.display().to_string();
+                            }
+                        }
+                    }
+                    
+                    #[cfg(target_os = "macos")]
+                    {
+                        // Native macOS file dialog
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Select Media Player")
+                            .add_filter("Applications", &["app"])
+                            .add_filter("All Files", &["*"])
+                            .pick_file() 
+                        {
+                            self.external_player = path.display().to_string();
+                        }
+                    }
+                }
+                
+                ui.separator();
+                
+                ui.label("📶 Connection:");
+                egui::ComboBox::from_id_salt("connection_quality")
+                    .selected_text(match self.connection_quality {
+                        ConnectionQuality::Fast => "Fast",
+                        ConnectionQuality::Normal => "Normal",
+                        ConnectionQuality::Slow => "Slow",
+                        ConnectionQuality::VerySlow => "Very Slow",
+                        ConnectionQuality::Custom => "⚙️ Custom",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.connection_quality, ConnectionQuality::Fast, "⚡ Fast (2s)");
+                        ui.selectable_value(&mut self.connection_quality, ConnectionQuality::Normal, "📶 Normal (5s)");
+                        ui.selectable_value(&mut self.connection_quality, ConnectionQuality::Slow, "🐢 Slow (15s)");
+                        ui.selectable_value(&mut self.connection_quality, ConnectionQuality::VerySlow, "🦥 Very Slow (30s)");
+                        ui.selectable_value(&mut self.connection_quality, ConnectionQuality::Custom, "⚙️ Custom");
+                    });
+                
+                if self.connection_quality == ConnectionQuality::Custom {
+                    ui.label("Buffer:");
+                    ui.add(egui::DragValue::new(&mut self.buffer_seconds)
+                        .range(1..=120)
+                        .suffix("s"));
+                }
+                
+                // Show effective buffer
+                ui.label(format!("({}s)", self.get_effective_buffer()));
+                
+                ui.separator();
+                
+                ui.checkbox(&mut self.hw_accel, "HW Acceleration")
+                    .on_hover_text("GPU Decoding\n\nEnable GPU hardware acceleration for video decoding\nDisable if you experience playback issues");
+            });
+            
+            ui.add_space(5.0);
+        });
+
+        // Bottom panel - Status
+        egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if self.loading {
+                    ui.spinner();
+                }
+                ui.label(&self.status_message);
+            });
+        });
+
+        // Main content
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if !self.logged_in {
+                ui.centered_and_justified(|ui| {
+                    ui.heading("Enter credentials and click Login");
+                });
+                return;
+            }
+
+            // Tab bar
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.current_tab, Tab::Live, "📺 LIVE");
+                ui.selectable_value(&mut self.current_tab, Tab::Movies, "🎬 MOVIES");
+                ui.selectable_value(&mut self.current_tab, Tab::Series, "📺 SERIES");
+                ui.selectable_value(&mut self.current_tab, Tab::Favorites, "⭐ FAVORITES");
+                ui.selectable_value(&mut self.current_tab, Tab::Info, "ℹ️ INFO");
+                
+                // Push Console to the right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.selectable_value(&mut self.current_tab, Tab::Console, "🖥 CONSOLE");
+                });
+            });
+            
+            ui.separator();
+
+            // Search bar (not for Info, Favorites, or Console tab)
+            if self.current_tab != Tab::Info && self.current_tab != Tab::Favorites && self.current_tab != Tab::Console {
+                ui.horizontal(|ui| {
+                    if !self.navigation_stack.is_empty() {
+                        if ui.button("⬅ Back").clicked() {
+                            self.go_back();
+                        }
+                    }
+                    
+                    ui.label("");
+                    ui.add(egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Search...")
+                        .desired_width(200.0));
+                });
+                ui.separator();
+            }
+
+            // Content area
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                match self.current_tab {
+                    Tab::Live => self.show_live_tab(ui),
+                    Tab::Movies => self.show_movies_tab(ui),
+                    Tab::Series => self.show_series_tab(ui),
+                    Tab::Favorites => self.show_favorites_tab(ui),
+                    Tab::Info => self.show_info_tab(ui),
+                    Tab::Console => self.show_console_tab(ui),
+                }
+            });
+        });
+
+        // Address Book Window
+        if self.show_address_book {
+            egui::Window::new("📚 Address Book")
+                .collapsible(false)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if ui.button("➕ Add New").clicked() {
+                        self.show_add_credential = true;
+                    }
+                    
+                    ui.separator();
+                    
+                    let mut to_delete: Option<usize> = None;
+                    let mut to_load: Option<SavedCredential> = None;
+                    
+                    for (i, cred) in self.address_book.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.button("▶").clicked() {
+                                to_load = Some(cred.clone());
+                            }
+                            ui.label(&cred.name);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗑").clicked() {
+                                    to_delete = Some(i);
+                                }
+                            });
+                        });
+                    }
+                    
+                    if let Some(cred) = to_load {
+                        self.load_credential(&cred);
+                    }
+                    if let Some(i) = to_delete {
+                        self.delete_credential(i);
+                    }
+                    
+                    ui.separator();
+                    if ui.button("Close").clicked() {
+                        self.show_address_book = false;
+                    }
+                });
+        }
+
+        // Add Credential Dialog
+        if self.show_add_credential {
+            egui::Window::new("Add Credential")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut self.new_cred_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Server:");
+                        ui.text_edit_singleline(&mut self.new_cred_server);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Username:");
+                        ui.text_edit_singleline(&mut self.new_cred_username);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Password:");
+                        ui.add(egui::TextEdit::singleline(&mut self.new_cred_password).password(true));
+                    });
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            self.save_credential();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_add_credential = false;
+                        }
+                    });
+                });
+        }
+
+        // M3U URL Dialog
+        if self.show_m3u_dialog {
+            egui::Window::new("M3U Plus URL")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label("Enter M3U Plus URL:");
+                    ui.add(egui::TextEdit::singleline(&mut self.m3u_url_input)
+                        .hint_text("http://server/get.php?username=...&password=...&type=m3u_plus")
+                        .desired_width(400.0));
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Extract & Login").clicked() {
+                            self.extract_m3u_credentials(&self.m3u_url_input.clone());
+                            self.show_m3u_dialog = false;
+                            self.login();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_m3u_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // User Agent Dialog
+        if self.show_user_agent_dialog {
+            egui::Window::new("🌐 User Agent Settings")
+                .collapsible(false)
+                .resizable(true)
+                .min_width(500.0)
+                .show(ctx, |ui| {
+                    ui.heading("Select User Agent");
+                    ui.separator();
+                    
+                    // Preset user agents
+                    ui.label("Preset User Agents:");
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (i, (name, _ua)) in USER_AGENTS.iter().enumerate() {
+                                let is_selected = !self.use_custom_user_agent && self.selected_user_agent == i;
+                                if ui.selectable_label(is_selected, *name).clicked() {
+                                    self.selected_user_agent = i;
+                                    self.use_custom_user_agent = false;
+                                }
+                            }
+                        });
+                    
+                    ui.separator();
+                    
+                    // Custom user agent
+                    ui.checkbox(&mut self.use_custom_user_agent, "Use custom User Agent");
+                    
+                    if self.use_custom_user_agent {
+                        ui.add(egui::TextEdit::multiline(&mut self.custom_user_agent)
+                            .hint_text("Enter custom user agent string...")
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(2));
+                    }
+                    
+                    ui.separator();
+                    
+                    // Pass user agent to player option
+                    ui.checkbox(&mut self.pass_user_agent_to_player, "Pass User Agent to media player");
+                    ui.label("[i] Disable if your player doesn't support user agent arguments (e.g. MPC-HC, PotPlayer)");
+                    
+                    ui.separator();
+                    
+                    // Current user agent display
+                    ui.label("Current User Agent:");
+                    let current_ua = self.get_user_agent();
+                    ui.add(egui::TextEdit::multiline(&mut current_ua.clone())
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(2)
+                        .interactive(false));
+                    
+                    ui.separator();
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Save & Close").clicked() {
+                            // Save to config
+                            self.config.selected_user_agent = self.selected_user_agent;
+                            self.config.custom_user_agent = self.custom_user_agent.clone();
+                            self.config.use_custom_user_agent = self.use_custom_user_agent;
+                            self.config.pass_user_agent_to_player = self.pass_user_agent_to_player;
+                            self.config.save();
+                            self.show_user_agent_dialog = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            // Revert changes
+                            self.selected_user_agent = self.config.selected_user_agent;
+                            self.custom_user_agent = self.config.custom_user_agent.clone();
+                            self.use_custom_user_agent = self.config.use_custom_user_agent;
+                            self.pass_user_agent_to_player = self.config.pass_user_agent_to_player;
+                            self.show_user_agent_dialog = false;
+                        }
+                    });
+                });
+        }
+        
+        // Internal Player Window
+        if self.show_internal_player {
+            let mut open = self.show_internal_player;
+            egui::Window::new("🎬 Internal Player")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([860.0, 540.0])
+                .show(ctx, |ui| {
+                    self.internal_player.show(ctx, ui);
+                });
+            
+            if !open {
+                self.show_internal_player = false;
+                self.internal_player.stop();
+            }
+        }
+    }
+}
+
+impl IPTVApp {
+    fn show_live_tab(&mut self, ui: &mut egui::Ui) {
+        self.show_category_tab(ui, "live");
+    }
+
+    fn show_movies_tab(&mut self, ui: &mut egui::Ui) {
+        self.show_category_tab(ui, "movie");
+    }
+
+    fn show_category_tab(&mut self, ui: &mut egui::Ui, stream_type: &str) {
+        let categories = match stream_type {
+            "live" => &self.live_categories,
+            "movie" => &self.movie_categories,
+            _ => return,
+        };
+
+        // If we have channels loaded, show them
+        if !self.current_channels.is_empty() && 
+           matches!(self.navigation_stack.last(), Some(NavigationLevel::Channels(_))) {
+            let search = self.search_query.to_lowercase();
+            let category_name = if let Some(NavigationLevel::Channels(name)) = self.navigation_stack.last() {
+                name.clone()
+            } else {
+                String::new()
+            };
+            
+            // Clone channels to avoid borrow issues
+            let channels: Vec<_> = self.current_channels.clone();
+            let mut toggle_fav: Option<FavoriteItem> = None;
+            let mut to_play: Option<Channel> = None;
+            
+            for channel in &channels {
+                let display_name = Self::sanitize_text(&channel.name);
+                if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
+                    continue;
+                }
+                
+                let is_fav = self.is_favorite(&channel.url);
+                
+                ui.horizontal(|ui| {
+                    // Favorite checkbox - use colored text for better visibility
+                    let fav_text = if is_fav { 
+                        egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)
+                    } else { 
+                        egui::RichText::new("☆").size(18.0).color(egui::Color32::GRAY)
+                    };
+                    if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                        toggle_fav = Some(FavoriteItem {
+                            name: channel.name.clone(),
+                            url: channel.url.clone(),
+                            stream_type: stream_type.to_string(),
+                            stream_id: channel.stream_id,
+                            series_id: None,
+                            category_name: category_name.clone(),
+                            container_extension: channel.container_extension.clone(),
+                        });
+                    }
+                    
+                    if ui.button("▶").clicked() {
+                        to_play = Some(channel.clone());
+                    }
+                    ui.label(&display_name);
+                });
+            }
+            
+            if let Some(channel) = to_play {
+                self.play_channel(&channel);
+            }
+            
+            if let Some(fav) = toggle_fav {
+                self.toggle_favorite(fav);
+            }
+            return;
+        }
+
+        // Show categories
+        let search = self.search_query.to_lowercase();
+        let mut clicked_category: Option<(String, String)> = None;
+        
+        for cat in categories {
+            let display_name = Self::sanitize_text(&cat.category_name);
+            if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
+                continue;
+            }
+            
+            if ui.button(&display_name).clicked() {
+                clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
+            }
+        }
+        
+        if let Some((cat_id, cat_name)) = clicked_category {
+            self.navigation_stack.push(NavigationLevel::Channels(cat_name));
+            self.fetch_channels(&cat_id, stream_type);
+        }
+    }
+
+    fn show_series_tab(&mut self, ui: &mut egui::Ui) {
+        let search = self.search_query.to_lowercase();
+
+        // Episodes level
+        if !self.current_episodes.is_empty() {
+            if let Some(NavigationLevel::Episodes(series_id, _)) = self.navigation_stack.last() {
+                let sid = *series_id;
+                let episodes: Vec<_> = self.current_episodes.clone();
+                let mut to_play: Option<(Episode, i64)> = None;
+                
+                for ep in &episodes {
+                    let display_title = Self::sanitize_text(&ep.title);
+                    if !search.is_empty() && !display_title.to_lowercase().contains(&search) {
+                        continue;
+                    }
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("▶").clicked() {
+                            to_play = Some((ep.clone(), sid));
+                        }
+                        ui.label(format!("E{}: {}", ep.episode_num, display_title));
+                    });
+                }
+                
+                if let Some((ep, series_id)) = to_play {
+                    self.play_episode(&ep, series_id);
+                }
+                return;
+            }
+        }
+
+        // Seasons level
+        if !self.current_seasons.is_empty() {
+            if let Some(NavigationLevel::Seasons(series_id)) = self.navigation_stack.last() {
+                let sid = *series_id;
+                let mut clicked_season: Option<i32> = None;
+                
+                for season in &self.current_seasons {
+                    if ui.button(format!("Season {}", season)).clicked() {
+                        clicked_season = Some(*season);
+                    }
+                }
+                
+                if let Some(s) = clicked_season {
+                    self.navigation_stack.push(NavigationLevel::Episodes(sid, s));
+                    self.fetch_episodes(sid, s);
+                }
+                return;
+            }
+        }
+
+        // Series list
+        if !self.current_series.is_empty() {
+            let mut clicked_series: Option<i64> = None;
+            
+            for series in &self.current_series {
+                let display_name = Self::sanitize_text(&series.name);
+                if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
+                    continue;
+                }
+                
+                if ui.button(&display_name).clicked() {
+                    clicked_series = Some(series.series_id);
+                }
+            }
+            
+            if let Some(sid) = clicked_series {
+                self.navigation_stack.push(NavigationLevel::Seasons(sid));
+                self.fetch_series_info(sid);
+            }
+            return;
+        }
+
+        // Categories
+        let mut clicked_category: Option<(String, String)> = None;
+        
+        for cat in &self.series_categories {
+            let display_name = Self::sanitize_text(&cat.category_name);
+            if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
+                continue;
+            }
+            
+            if ui.button(&display_name).clicked() {
+                clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
+            }
+        }
+        
+        if let Some((cat_id, cat_name)) = clicked_category {
+            self.navigation_stack.push(NavigationLevel::Series(cat_name));
+            self.fetch_series_list(&cat_id);
+        }
+    }
+
+    fn show_favorites_tab(&mut self, ui: &mut egui::Ui) {
+        if self.favorites.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(50.0);
+                ui.heading("No favorites yet");
+                ui.label("Click ☆ next to any channel or movie to add it to favorites");
+            });
+            return;
+        }
+        
+        // Clone favorites to avoid borrow issues
+        let live_favs: Vec<_> = self.favorites.iter()
+            .filter(|f| f.stream_type == "live")
+            .cloned()
+            .collect();
+        let movie_favs: Vec<_> = self.favorites.iter()
+            .filter(|f| f.stream_type == "movie")
+            .cloned()
+            .collect();
+        let series_favs: Vec<_> = self.favorites.iter()
+            .filter(|f| f.stream_type == "series")
+            .cloned()
+            .collect();
+        
+        let mut to_remove: Option<String> = None;
+        let mut to_play: Option<FavoriteItem> = None;
+        
+        if !live_favs.is_empty() {
+            egui::CollapsingHeader::new(format!("Live Channels ({})", live_favs.len()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for fav in &live_favs {
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)).on_hover_text("Remove from favorites").clicked() {
+                                to_remove = Some(fav.url.clone());
+                            }
+                            if ui.button("▶").clicked() {
+                                to_play = Some(fav.clone());
+                            }
+                            ui.label(Self::sanitize_text(&fav.name));
+                            ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
+                        });
+                    }
+                });
+        }
+        
+        if !movie_favs.is_empty() {
+            egui::CollapsingHeader::new(format!("Movies ({})", movie_favs.len()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for fav in &movie_favs {
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)).on_hover_text("Remove from favorites").clicked() {
+                                to_remove = Some(fav.url.clone());
+                            }
+                            if ui.button("▶").clicked() {
+                                to_play = Some(fav.clone());
+                            }
+                            ui.label(Self::sanitize_text(&fav.name));
+                            ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
+                        });
+                    }
+                });
+        }
+        
+        if !series_favs.is_empty() {
+            egui::CollapsingHeader::new(format!("Series ({})", series_favs.len()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for fav in &series_favs {
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)).on_hover_text("Remove from favorites").clicked() {
+                                to_remove = Some(fav.url.clone());
+                            }
+                            if ui.button("▶").clicked() {
+                                to_play = Some(fav.clone());
+                            }
+                            ui.label(Self::sanitize_text(&fav.name));
+                            ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
+                        });
+                    }
+                });
+        }
+        
+        // Handle play action
+        if let Some(fav) = to_play {
+            self.play_favorite(&fav);
+        }
+        
+        // Handle removal
+        if let Some(url) = to_remove {
+            if let Some(pos) = self.favorites.iter().position(|f| f.url == url) {
+                let name = self.favorites[pos].name.clone();
+                self.favorites.remove(pos);
+                self.status_message = format!("Removed '{}' from favorites", name);
+                // Auto-save
+                self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
+                self.config.save();
+            }
+        }
+        
+        ui.add_space(20.0);
+        ui.separator();
+        
+        if ui.button("🗑 Clear All Favorites").clicked() {
+            self.favorites.clear();
+            self.config.favorites_json.clear();
+            self.config.save();
+            self.status_message = "All favorites cleared".to_string();
+        }
+    }
+
+    fn show_info_tab(&self, ui: &mut egui::Ui) {
+        ui.heading("Account Information");
+        ui.separator();
+        
+        egui::Grid::new("info_grid")
+            .num_columns(2)
+            .spacing([20.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Host:");
+                ui.label(format!("{}:{}", self.server_info.url, self.server_info.port));
+                ui.end_row();
+                
+                ui.label("Username:");
+                ui.label(&self.user_info.username);
+                ui.end_row();
+                
+                ui.label("Password:");
+                ui.label(&self.user_info.password);
+                ui.end_row();
+                
+                ui.label("Status:");
+                ui.label(&self.user_info.status);
+                ui.end_row();
+                
+                ui.label("Max Connections:");
+                ui.label(&self.user_info.max_connections);
+                ui.end_row();
+                
+                ui.label("Active Connections:");
+                ui.label(&self.user_info.active_connections);
+                ui.end_row();
+                
+                ui.label("Trial:");
+                ui.label(if self.user_info.is_trial { "Yes" } else { "No" });
+                ui.end_row();
+                
+                ui.label("Timezone:");
+                ui.label(&self.server_info.timezone);
+                ui.end_row();
+                
+                ui.label("Expiry:");
+                ui.label(&self.user_info.expiry);
+                ui.end_row();
+            });
+    }
+    
+    fn show_console_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Console Log");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("🗑 Clear").clicked() {
+                    self.console_log.clear();
+                    self.console_log.push(format!("[{}] Console cleared", chrono::Local::now().format("%H:%M:%S")));
+                }
+            });
+        });
+        ui.separator();
+        
+        // Display log entries with monospace font
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in &self.console_log {
+                    let color = if line.contains("[ERROR]") {
+                        egui::Color32::RED
+                    } else if line.contains("[WARN]") {
+                        egui::Color32::YELLOW
+                    } else if line.contains("[INFO]") {
+                        egui::Color32::LIGHT_BLUE
+                    } else if line.contains("[PLAY]") {
+                        egui::Color32::GREEN
+                    } else {
+                        egui::Color32::GRAY
+                    };
+                    
+                    ui.label(egui::RichText::new(line).monospace().color(color));
+                }
+            });
+    }
+}
+
+fn format_timestamp(ts: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    
+    let d = UNIX_EPOCH + Duration::from_secs(ts as u64);
+    // Simple formatting - in production use chrono crate
+    format!("{:?}", d)
+}
