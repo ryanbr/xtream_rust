@@ -10,7 +10,6 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use eframe::egui;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -19,11 +18,13 @@ use std::io::{BufRead, BufReader};
 
 mod api;
 mod config;
+mod models;
 mod m3u_parser;
 mod ffmpeg_player;
 
 use api::*;
 use config::*;
+use models::*;
 use ffmpeg_player::PlayerWindow;
 
 // Re-export ConnectionQuality for use in main
@@ -188,67 +189,6 @@ fn main() -> Result<(), eframe::Error> {
             Ok(Box::new(IPTVApp::new()))
         }),
     )
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Tab {
-    Live,
-    Movies,
-    Series,
-    Favorites,
-    Info,
-    Console,
-}
-
-#[derive(Debug, Clone)]
-enum NavigationLevel {
-    Categories,
-    Channels(String), // category name
-    Series(String),   // series name
-    Seasons(i64),     // series_id
-    Episodes(i64, i32), // series_id, season_num
-}
-
-#[derive(Debug, Clone)]
-struct Channel {
-    name: String,
-    url: String,
-    stream_id: Option<i64>,
-    category_id: Option<String>,
-    epg_channel_id: Option<String>,
-    stream_icon: Option<String>,
-    series_id: Option<i64>,
-    container_extension: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct UserInfo {
-    username: String,
-    password: String,
-    status: String,
-    max_connections: String,
-    active_connections: String,
-    is_trial: bool,
-    expiry: String,
-    created_at: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ServerInfo {
-    url: String,
-    port: String,
-    timezone: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct FavoriteItem {
-    name: String,
-    url: String,
-    stream_type: String, // "live", "movie", "series"
-    stream_id: Option<i64>,
-    series_id: Option<i64>,
-    category_name: String,
-    container_extension: Option<String>,
 }
 
 struct IPTVApp {
