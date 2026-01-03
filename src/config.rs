@@ -147,9 +147,33 @@ impl AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedCredential {
     pub name: String,
+    // Server credentials
     pub server: String,
     pub username: String,
     pub password: String,
+    // Player settings
+    #[serde(default)]
+    pub external_player: String,
+    #[serde(default = "default_buffer")]
+    pub buffer_seconds: u32,
+    #[serde(default)]
+    pub connection_quality: ConnectionQuality,
+    // User agent settings
+    #[serde(default)]
+    pub selected_user_agent: usize,
+    #[serde(default)]
+    pub custom_user_agent: String,
+    #[serde(default)]
+    pub use_custom_user_agent: bool,
+    #[serde(default = "default_true")]
+    pub pass_user_agent_to_player: bool,
+    // EPG settings
+    #[serde(default)]
+    pub epg_url: String,
+    #[serde(default)]
+    pub epg_time_offset: f32,
+    #[serde(default = "default_epg_auto_update")]
+    pub epg_auto_update_index: u8,
 }
 
 fn address_book_path() -> PathBuf {

@@ -444,12 +444,8 @@ struct IPTVApp {
     show_m3u_dialog: bool,
     m3u_url_input: String,
     
-    // Add credential dialog
-    show_add_credential: bool,
+    // Address book - save name input
     new_cred_name: String,
-    new_cred_server: String,
-    new_cred_username: String,
-    new_cred_password: String,
     
     // Console log
     console_log: Vec<String>,
@@ -568,11 +564,7 @@ impl IPTVApp {
             show_address_book: false,
             show_m3u_dialog: false,
             m3u_url_input: String::new(),
-            show_add_credential: false,
             new_cred_name: String::new(),
-            new_cred_server: String::new(),
-            new_cred_username: String::new(),
-            new_cred_password: String::new(),
             console_log: vec!["[INFO] Xtreme IPTV Player started".to_string()],
             single_window_mode,
             current_player: None,
@@ -1605,43 +1597,6 @@ impl IPTVApp {
             }
         }
     }
-
-    fn save_credential(&mut self) {
-        if self.new_cred_name.is_empty() {
-            return;
-        }
-
-        let cred = SavedCredential {
-            name: self.new_cred_name.clone(),
-            server: self.new_cred_server.clone(),
-            username: self.new_cred_username.clone(),
-            password: self.new_cred_password.clone(),
-        };
-
-        self.address_book.push(cred);
-        save_address_book(&self.address_book);
-
-        // Clear form
-        self.new_cred_name.clear();
-        self.new_cred_server.clear();
-        self.new_cred_username.clear();
-        self.new_cred_password.clear();
-        self.show_add_credential = false;
-    }
-
-    fn load_credential(&mut self, cred: &SavedCredential) {
-        self.server = cred.server.clone();
-        self.username = cred.username.clone();
-        self.password = cred.password.clone();
-        self.show_address_book = false;
-    }
-
-    fn delete_credential(&mut self, index: usize) {
-        if index < self.address_book.len() {
-            self.address_book.remove(index);
-            save_address_book(&self.address_book);
-        }
-    }
 }
 
 impl eframe::App for IPTVApp {
@@ -2079,72 +2034,130 @@ impl eframe::App for IPTVApp {
             egui::Window::new("📚 Address Book")
                 .collapsible(false)
                 .resizable(true)
+                .min_width(350.0)
                 .show(ctx, |ui| {
-                    if ui.button("➕ Add New").clicked() {
-                        self.show_add_credential = true;
-                    }
-                    
-                    ui.separator();
-                    
-                    let mut to_delete: Option<usize> = None;
-                    let mut to_load: Option<SavedCredential> = None;
-                    
-                    for (i, cred) in self.address_book.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui.button("▶").clicked() {
-                                to_load = Some(cred.clone());
-                            }
-                            ui.label(&cred.name);
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("🗑").clicked() {
-                                    to_delete = Some(i);
-                                }
-                            });
-                        });
-                    }
-                    
-                    if let Some(cred) = to_load {
-                        self.load_credential(&cred);
-                    }
-                    if let Some(i) = to_delete {
-                        self.delete_credential(i);
-                    }
-                    
-                    ui.separator();
-                    if ui.button("Close").clicked() {
-                        self.show_address_book = false;
-                    }
-                });
-        }
-
-        // Add Credential Dialog
-        if self.show_add_credential {
-            egui::Window::new("Add Credential")
-                .collapsible(false)
-                .show(ctx, |ui| {
+                    // Save current credentials section
+                    ui.heading("Save Current Settings");
                     ui.horizontal(|ui| {
                         ui.label("Name:");
                         ui.text_edit_singleline(&mut self.new_cred_name);
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Server:");
-                        ui.text_edit_singleline(&mut self.new_cred_server);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Username:");
-                        ui.text_edit_singleline(&mut self.new_cred_username);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Password:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_cred_password).password(true));
+                    
+                    // Show what will be saved
+                    if !self.server.is_empty() {
+                        ui.label(egui::RichText::new(format!("{}@{}", self.username, self.server)).weak());
+                    }
+                    
+                    let can_save = !self.new_cred_name.is_empty() && !self.server.is_empty();
+                    ui.add_enabled_ui(can_save, |ui| {
+                        if ui.button("💾 Save to Address Book").clicked() {
+                            let cred = SavedCredential {
+                                name: self.new_cred_name.clone(),
+                                // Server credentials
+                                server: self.server.clone(),
+                                username: self.username.clone(),
+                                password: self.password.clone(),
+                                // Player settings
+                                external_player: self.external_player.clone(),
+                                buffer_seconds: self.buffer_seconds,
+                                connection_quality: self.connection_quality,
+                                // User agent settings
+                                selected_user_agent: self.selected_user_agent,
+                                custom_user_agent: self.custom_user_agent.clone(),
+                                use_custom_user_agent: self.use_custom_user_agent,
+                                pass_user_agent_to_player: self.pass_user_agent_to_player,
+                                // EPG settings
+                                epg_url: self.epg_url_input.clone(),
+                                epg_time_offset: self.epg_time_offset,
+                                epg_auto_update_index: self.epg_auto_update.to_index(),
+                            };
+                            self.address_book.push(cred);
+                            save_address_book(&self.address_book);
+                            self.new_cred_name.clear();
+                            self.status_message = "Saved to address book".to_string();
+                        }
                     });
                     
+                    if !can_save && self.server.is_empty() {
+                        ui.label(egui::RichText::new("Enter server credentials first").small().weak());
+                    }
+                    
+                    ui.separator();
+                    
+                    // Saved credentials list
+                    ui.heading("Saved Credentials");
+                    
+                    if self.address_book.is_empty() {
+                        ui.label(egui::RichText::new("No saved credentials").weak());
+                    }
+                    
+                    let mut to_delete: Option<usize> = None;
+                    let mut to_load: Option<SavedCredential> = None;
+                    
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (i, cred) in self.address_book.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    // Load button
+                                    if ui.button("▶").on_hover_text("Load credentials").clicked() {
+                                        to_load = Some(cred.clone());
+                                    }
+                                    
+                                    // Name and server info
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new(&cred.name).strong());
+                                        ui.label(egui::RichText::new(format!("{}@{}", cred.username, cred.server)).weak());
+                                    });
+                                    
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("🗑").on_hover_text("Delete").clicked() {
+                                            to_delete = Some(i);
+                                        }
+                                    });
+                                });
+                                ui.separator();
+                            }
+                        });
+                    
+                    if let Some(cred) = to_load {
+                        // Server credentials
+                        self.server = cred.server;
+                        self.username = cred.username;
+                        self.password = cred.password;
+                        // Player settings
+                        self.external_player = cred.external_player;
+                        self.buffer_seconds = cred.buffer_seconds;
+                        self.connection_quality = cred.connection_quality;
+                        // User agent settings
+                        self.selected_user_agent = cred.selected_user_agent;
+                        self.custom_user_agent = cred.custom_user_agent;
+                        self.use_custom_user_agent = cred.use_custom_user_agent;
+                        self.pass_user_agent_to_player = cred.pass_user_agent_to_player;
+                        // EPG settings
+                        self.epg_url_input = cred.epg_url;
+                        self.epg_time_offset = cred.epg_time_offset;
+                        self.epg_auto_update = EpgAutoUpdate::from_index(cred.epg_auto_update_index);
+                        // Clear EPG data since we're loading new provider
+                        self.epg_data = None;
+                        self.epg_last_update = None;
+                        
+                        self.status_message = format!("Loaded '{}'", cred.name);
+                        self.show_address_book = false;
+                    }
+                    
+                    if let Some(i) = to_delete {
+                        let name = self.address_book[i].name.clone();
+                        self.address_book.remove(i);
+                        save_address_book(&self.address_book);
+                        self.status_message = format!("Removed '{}'", name);
+                    }
+                    
+                    ui.separator();
+                    
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            self.save_credential();
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.show_add_credential = false;
+                        if ui.button("Close").clicked() {
+                            self.show_address_book = false;
                         }
                     });
                 });
