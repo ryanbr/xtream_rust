@@ -101,11 +101,13 @@ fn main() -> Result<(), eframe::Error> {
     }
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 650.0])
-            .with_min_inner_size([700.0, 500.0]),
-        ..Default::default()
-    };
+    viewport: egui::ViewportBuilder::default()
+        .with_inner_size([900.0, 650.0])
+        .with_min_inner_size([700.0, 500.0]),
+    vsync: true,
+    hardware_acceleration: eframe::HardwareAcceleration::Preferred,
+    ..Default::default()
+};
 
     eframe::run_native(
         "Xtreme IPTV Player - Rust Edition",
