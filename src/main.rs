@@ -471,6 +471,7 @@ struct IPTVApp {
     epg_last_update: Option<i64>,
     epg_startup_loaded: bool,
     epg_last_ui_refresh: i64,
+    epg_show_actual_time: bool, // false = offset mode (Now, +30m), true = actual time (8:00 PM)
     selected_epg_channel: Option<String>,
 }
 
@@ -517,6 +518,7 @@ impl IPTVApp {
         let epg_url = config.epg_url.clone();
         let epg_auto_update_index = config.epg_auto_update_index;
         let epg_time_offset = config.epg_time_offset;
+        let epg_show_actual_time = config.epg_show_actual_time;
         
         Self {
             server,
@@ -583,6 +585,7 @@ impl IPTVApp {
             epg_last_update: None,
             epg_startup_loaded: false,
             epg_last_ui_refresh: 0,
+            epg_show_actual_time: epg_show_actual_time,
             selected_epg_channel: None,
         }
     }
@@ -614,6 +617,7 @@ impl IPTVApp {
         self.config.epg_url = self.epg_url_input.clone();
         self.config.epg_auto_update_index = self.epg_auto_update.to_index();
         self.config.epg_time_offset = self.epg_time_offset;
+        self.config.epg_show_actual_time = self.epg_show_actual_time;
         
         // Save favorites
         self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
@@ -646,6 +650,7 @@ impl IPTVApp {
                     epg_url: self.epg_url_input.clone(),
                     epg_time_offset: self.epg_time_offset,
                     epg_auto_update_index: self.epg_auto_update.to_index(),
+                    epg_show_actual_time: self.epg_show_actual_time,
                 };
                 
                 // Update existing entry or add new one (match by server+username)
@@ -2145,6 +2150,7 @@ impl eframe::App for IPTVApp {
                                 epg_url: self.epg_url_input.clone(),
                                 epg_time_offset: self.epg_time_offset,
                                 epg_auto_update_index: self.epg_auto_update.to_index(),
+                                epg_show_actual_time: self.epg_show_actual_time,
                             };
                             
                             // Update existing or add new
@@ -2225,6 +2231,7 @@ impl eframe::App for IPTVApp {
                         self.epg_url_input = cred.epg_url;
                         self.epg_time_offset = cred.epg_time_offset;
                         self.epg_auto_update = EpgAutoUpdate::from_index(cred.epg_auto_update_index);
+                        self.epg_show_actual_time = cred.epg_show_actual_time;
                         // Clear EPG data since we're loading new provider
                         self.epg_data = None;
                         self.epg_last_update = None;
@@ -2439,6 +2446,15 @@ impl eframe::App for IPTVApp {
                                 self.epg_time_offset = 0.0;
                             }
                         }
+                    });
+                    
+                    // EPG Grid display mode
+                    ui.horizontal(|ui| {
+                        ui.label("Grid Header:");
+                        ui.selectable_value(&mut self.epg_show_actual_time, false, "Offset (Now, +30m...)")
+                            .on_hover_text("Show relative time offsets");
+                        ui.selectable_value(&mut self.epg_show_actual_time, true, "Time (8:00, 8:30...)")
+                            .on_hover_text("Show actual times");
                     });
                     
                     if !self.epg_status.is_empty() {
@@ -3061,8 +3077,26 @@ impl IPTVApp {
         let prog_col_width = 130.0;
         let num_progs = 7; // Show 7 programs (current + 6 upcoming), user scrolls to see more
         
-        // Time header labels
-        let time_labels = ["Now", "+30m", "+60m", "+90m", "+2h", "+2.5h", "+3h"];
+        // Time header labels - either offset or actual time
+        let time_labels: Vec<String> = if self.epg_show_actual_time {
+            // Calculate actual times based on adjusted_now
+            let offsets_mins = [0, 30, 60, 90, 120, 150, 180];
+            offsets_mins.iter().map(|&offset| {
+                let ts = adjusted_now + (offset * 60);
+                Self::format_time(ts)
+            }).collect()
+        } else {
+            // Offset mode
+            vec![
+                "Now".to_string(),
+                "+30m".to_string(),
+                "+60m".to_string(),
+                "+90m".to_string(),
+                "+2h".to_string(),
+                "+2.5h".to_string(),
+                "+3h".to_string(),
+            ]
+        };
         
         // Get channels to display based on current view
         let channels_to_show: Vec<(String, Option<String>)> = match self.current_tab {
@@ -3094,9 +3128,9 @@ impl IPTVApp {
             .show(ui, |ui| {
                 // Time header row
                 ui.horizontal(|ui| {
-                    ui.add_sized([channel_col_width, 18.0], egui::Label::new("")); // Channel column spacer
-                    for label in time_labels.iter() {
-                        ui.add_sized([prog_col_width, 18.0], egui::Label::new(egui::RichText::new(*label).small().strong()));
+                    ui.add_sized([channel_col_width, 20.0], egui::Label::new("")); // Channel column spacer
+                    for label in &time_labels {
+                        ui.add_sized([prog_col_width, 20.0], egui::Label::new(egui::RichText::new(label).strong()));
                     }
                 });
                 
@@ -3270,10 +3304,18 @@ impl IPTVApp {
     }
     
     fn format_time(ts: i64) -> String {
-        let secs = ts % 86400;
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        format!("{:02}:{:02}", hours, mins)
+        // Convert UTC timestamp to local time display using chrono
+        use chrono::{TimeZone, Local};
+        
+        if let Some(dt) = Local.timestamp_opt(ts, 0).single() {
+            dt.format("%H:%M").to_string()
+        } else {
+            // Fallback for invalid timestamp
+            let secs = ts % 86400;
+            let hours = (secs / 3600) % 24;
+            let mins = (secs % 3600) / 60;
+            format!("{:02}:{:02}", hours, mins)
+        }
     }
     
     fn format_datetime(ts: i64) -> String {

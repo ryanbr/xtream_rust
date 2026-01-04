@@ -77,6 +77,8 @@ pub struct AppConfig {
     pub epg_auto_update_index: u8,
     #[serde(default)]
     pub epg_time_offset: f32,
+    #[serde(default)]
+    pub epg_show_actual_time: bool,
 }
 
 fn default_buffer() -> u32 { 5 }
@@ -109,6 +111,7 @@ impl Default for AppConfig {
             epg_url: String::new(),
             epg_auto_update_index: 3, // 1 Day
             epg_time_offset: 0.0,
+            epg_show_actual_time: false,
         }
     }
 }
@@ -176,6 +179,8 @@ pub struct SavedCredential {
     pub epg_time_offset: f32,
     #[serde(default = "default_epg_auto_update")]
     pub epg_auto_update_index: u8,
+    #[serde(default)]
+    pub epg_show_actual_time: bool,
 }
 
 fn address_book_path() -> PathBuf {
