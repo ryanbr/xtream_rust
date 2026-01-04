@@ -1122,6 +1122,9 @@ impl IPTVApp {
             "movie"
         };
         
+        // Don't reorder if playing from Recent tab
+        let reorder = self.current_tab != Tab::Recent;
+        
         self.add_to_recent(FavoriteItem {
             name: channel.name.clone(),
             url: channel.url.clone(),
@@ -1130,7 +1133,7 @@ impl IPTVApp {
             series_id: channel.series_id,
             category_name,
             container_extension: channel.container_extension.clone(),
-        });
+        }, reorder);
         
         // Use internal player if enabled OR if user typed "internal" in player field
         let player_lower = self.external_player.to_lowercase();
@@ -2479,39 +2482,27 @@ impl eframe::App for IPTVApp {
                                 ui.label(format!("{}", epg.program_count()));
                                 ui.end_row();
                             });
-                        
-                        ui.separator();
-                        
-                        if ui.button("🗑 Clear EPG Data").clicked() {
-                            self.epg_data = None;
-                            self.epg_last_update = None;
-                            self.epg_status = "EPG data cleared".to_string();
-                            self.log("[INFO] EPG data cleared");
+                    }
+                    
+                    ui.separator();
+                    
+                    // Close on left, Clear EPG Data on right - same row
+                    ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            self.show_epg_dialog = false;
                         }
-                    }
-                    
-                    ui.separator();
-                    
-                    // Progress section
-                    if self.epg_loading {
-                        ui.label("Downloading and parsing...");
-                        ui.add(egui::ProgressBar::new(self.epg_progress).show_percentage().animate(true));
-                        ui.label(egui::RichText::new(&self.epg_status).color(egui::Color32::YELLOW));
-                    } else if self.epg_status.starts_with("Loaded") {
-                        ui.label(egui::RichText::new("✓ Completed").color(egui::Color32::GREEN).strong());
-                        ui.add(egui::ProgressBar::new(1.0).show_percentage());
-                        ui.label(egui::RichText::new(&self.epg_status).color(egui::Color32::GREEN));
-                    } else if self.epg_status.starts_with("Error") {
-                        ui.label(egui::RichText::new("✗ Failed").color(egui::Color32::RED).strong());
-                        ui.add(egui::ProgressBar::new(0.0).show_percentage());
-                        ui.label(egui::RichText::new(&self.epg_status).color(egui::Color32::RED));
-                    }
-                    
-                    ui.separator();
-                    
-                    if ui.button("Close").clicked() {
-                        self.show_epg_dialog = false;
-                    }
+                        
+                        if self.epg_data.is_some() {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗑 Clear EPG Data").clicked() {
+                                    self.epg_data = None;
+                                    self.epg_last_update = None;
+                                    self.epg_status = "EPG data cleared".to_string();
+                                    self.log("[INFO] EPG data cleared");
+                                }
+                            });
+                        }
+                    });
                 });
         }
         
@@ -2963,12 +2954,22 @@ impl IPTVApp {
         }
     }
 
-    fn add_to_recent(&mut self, item: FavoriteItem) {
-        // Remove if already in list (to move to top)
-        self.recent_watched.retain(|r| r.url != item.url);
-        
-        // Add to front (newest first)
-        self.recent_watched.insert(0, item);
+    fn add_to_recent(&mut self, item: FavoriteItem, reorder: bool) {
+        if reorder {
+            // Remove if already in list (to move to top)
+            self.recent_watched.retain(|r| r.url != item.url);
+            
+            // Add to front (newest first)
+            self.recent_watched.insert(0, item);
+        } else {
+            // Don't reorder - only add if not already in list
+            if !self.recent_watched.iter().any(|r| r.url == item.url) {
+                self.recent_watched.insert(0, item);
+            } else {
+                // Already in list, don't change anything
+                return;
+            }
+        }
         
         // Keep only last 25
         self.recent_watched.truncate(25);
