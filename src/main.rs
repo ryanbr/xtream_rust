@@ -20,14 +20,14 @@ mod api;
 mod config;
 mod models;
 mod m3u_parser;
-mod epg_parser;
+mod epg;
 mod ffmpeg_player;
 
 use api::*;
 use config::*;
 use models::*;
 use ffmpeg_player::PlayerWindow;
-use epg_parser::EpgData;
+use epg::{EpgData, EpgAutoUpdate, EpgDownloader, DownloadConfig, Program};
 
 // Re-export ConnectionQuality for use in main
 
@@ -172,75 +172,6 @@ enum TaskResult {
     EpgLoading { progress: String },
     EpgLoaded { data: Box<EpgData> },
     EpgError(String),
-}
-
-/// EPG auto-update interval
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum EpgAutoUpdate {
-    Off,
-    Hours6,
-    Hours12,
-    #[default]
-    Day1,
-    Days2,
-    Days3,
-    Days4,
-    Days5,
-}
-
-impl EpgAutoUpdate {
-    fn as_secs(&self) -> Option<i64> {
-        match self {
-            EpgAutoUpdate::Off => None,
-            EpgAutoUpdate::Hours6 => Some(6 * 3600),
-            EpgAutoUpdate::Hours12 => Some(12 * 3600),
-            EpgAutoUpdate::Day1 => Some(24 * 3600),
-            EpgAutoUpdate::Days2 => Some(2 * 24 * 3600),
-            EpgAutoUpdate::Days3 => Some(3 * 24 * 3600),
-            EpgAutoUpdate::Days4 => Some(4 * 24 * 3600),
-            EpgAutoUpdate::Days5 => Some(5 * 24 * 3600),
-        }
-    }
-    
-    fn label(&self) -> &'static str {
-        match self {
-            EpgAutoUpdate::Off => "Off",
-            EpgAutoUpdate::Hours6 => "6 Hours",
-            EpgAutoUpdate::Hours12 => "12 Hours",
-            EpgAutoUpdate::Day1 => "1 Day",
-            EpgAutoUpdate::Days2 => "2 Days",
-            EpgAutoUpdate::Days3 => "3 Days",
-            EpgAutoUpdate::Days4 => "4 Days",
-            EpgAutoUpdate::Days5 => "5 Days",
-        }
-    }
-    
-    fn to_index(&self) -> u8 {
-        match self {
-            EpgAutoUpdate::Off => 0,
-            EpgAutoUpdate::Hours6 => 1,
-            EpgAutoUpdate::Hours12 => 2,
-            EpgAutoUpdate::Day1 => 3,
-            EpgAutoUpdate::Days2 => 4,
-            EpgAutoUpdate::Days3 => 5,
-            EpgAutoUpdate::Days4 => 6,
-            EpgAutoUpdate::Days5 => 7,
-        }
-    }
-    
-    fn from_index(i: u8) -> Self {
-        match i {
-            0 => EpgAutoUpdate::Off,
-            1 => EpgAutoUpdate::Hours6,
-            2 => EpgAutoUpdate::Hours12,
-            3 => EpgAutoUpdate::Day1,
-            4 => EpgAutoUpdate::Days2,
-            5 => EpgAutoUpdate::Days3,
-            6 => EpgAutoUpdate::Days4,
-            7 => EpgAutoUpdate::Days5,
-            _ => EpgAutoUpdate::Day1,
-        }
-    }
 }
 
 // Predefined user agents
@@ -1082,8 +1013,6 @@ impl IPTVApp {
         let user_agent = self.get_user_agent();
         
         thread::spawn(move || {
-            use epg_parser::{DownloadConfig, EpgDownloader};
-            
             let config = DownloadConfig {
                 max_retries: 3,
                 retry_delay_ms: 2000,
@@ -1095,7 +1024,7 @@ impl IPTVApp {
             
             // Progress callback sends updates to UI
             let progress_sender = sender.clone();
-            let progress_callback: Option<epg_parser::ProgressCallback> = Some(Box::new(move |downloaded, total| {
+            let progress_callback: Option<epg::ProgressCallback> = Some(Box::new(move |downloaded, total| {
                 let msg = if let Some(total) = total {
                     let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
                     let dl_mb = downloaded as f64 / 1_048_576.0;
@@ -1122,7 +1051,7 @@ impl IPTVApp {
         });
     }
     
-    fn get_current_program(&self, epg_channel_id: &str) -> Option<&epg_parser::Program> {
+    fn get_current_program(&self, epg_channel_id: &str) -> Option<&Program> {
         let epg = self.epg_data.as_ref()?;
         let offset_secs = (self.epg_time_offset * 3600.0) as i64;
         let now = std::time::SystemTime::now()
@@ -1138,7 +1067,7 @@ impl IPTVApp {
     }
     
     /// Get current and next N programs for a channel (with time offset applied)
-    fn get_upcoming_programs(&self, epg_channel_id: &str, count: usize) -> Vec<&epg_parser::Program> {
+    fn get_upcoming_programs(&self, epg_channel_id: &str, count: usize) -> Vec<&Program> {
         let Some(epg) = self.epg_data.as_ref() else { return Vec::new() };
         let offset_secs = (self.epg_time_offset * 3600.0) as i64;
         let now = std::time::SystemTime::now()
@@ -3363,55 +3292,11 @@ impl IPTVApp {
     }
     
     fn format_time(ts: i64) -> String {
-        // Convert UTC timestamp to local time display using chrono
-        use chrono::{TimeZone, Local};
-        
-        if let Some(dt) = Local.timestamp_opt(ts, 0).single() {
-            dt.format("%H:%M").to_string()
-        } else {
-            // Fallback for invalid timestamp
-            let secs = ts % 86400;
-            let hours = (secs / 3600) % 24;
-            let mins = (secs % 3600) / 60;
-            format!("{:02}:{:02}", hours, mins)
-        }
+        epg::format_time(ts)
     }
     
     fn format_datetime(ts: i64) -> String {
-        // Convert Unix timestamp to readable date/time
-        let secs_per_day = 86400;
-        let days_since_epoch = ts / secs_per_day;
-        let secs_today = ts % secs_per_day;
-        
-        let hours = secs_today / 3600;
-        let mins = (secs_today % 3600) / 60;
-        
-        // Simple date calculation (approximate, doesn't account for leap years perfectly)
-        let mut year = 1970;
-        let mut remaining_days = days_since_epoch;
-        
-        loop {
-            let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
-            if remaining_days < days_in_year {
-                break;
-            }
-            remaining_days -= days_in_year;
-            year += 1;
-        }
-        
-        let days_in_months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut month = 1;
-        for &days in &days_in_months {
-            let days = if month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 29 } else { days };
-            if remaining_days < days {
-                break;
-            }
-            remaining_days -= days;
-            month += 1;
-        }
-        let day = remaining_days + 1;
-        
-        format!("{:04}-{:02}-{:02} {:02}:{:02}", year, month, day, hours, mins)
+        epg::format_datetime(ts)
     }
 }
 
