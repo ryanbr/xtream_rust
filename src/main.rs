@@ -624,6 +624,35 @@ impl IPTVApp {
             self.config.saved_server = self.server.clone();
             self.config.saved_username = self.username.clone();
             self.config.saved_password = self.password.clone();
+            
+            // Also save to Address Book if server is set
+            if !self.server.is_empty() {
+                // Create credential entry
+                let cred = SavedCredential {
+                    name: format!("{}@{}", self.username, self.server),
+                    server: self.server.clone(),
+                    username: self.username.clone(),
+                    password: self.password.clone(),
+                    external_player: self.external_player.clone(),
+                    buffer_seconds: self.buffer_seconds,
+                    connection_quality: self.connection_quality,
+                    selected_user_agent: self.selected_user_agent,
+                    custom_user_agent: self.custom_user_agent.clone(),
+                    use_custom_user_agent: self.use_custom_user_agent,
+                    pass_user_agent_to_player: self.pass_user_agent_to_player,
+                    epg_url: self.epg_url_input.clone(),
+                    epg_time_offset: self.epg_time_offset,
+                    epg_auto_update_index: self.epg_auto_update.to_index(),
+                };
+                
+                // Update existing entry or add new one (match by server+username)
+                if let Some(existing) = self.address_book.iter_mut().find(|c| c.server == cred.server && c.username == cred.username) {
+                    *existing = cred;
+                } else {
+                    self.address_book.push(cred);
+                }
+                save_address_book(&self.address_book);
+            }
         } else {
             self.config.saved_server.clear();
             self.config.saved_username.clear();
