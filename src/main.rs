@@ -3159,7 +3159,7 @@ impl IPTVApp {
                 // Channel rows
                 for (channel_name, epg_id_opt) in &channels_to_show {
                     // Try to find EPG ID - first from provided, then from current_channels, then from EPG data
-                    let epg_id = epg_id_opt.clone()
+                    let epg_id = epg_id_opt.as_ref().cloned()
                         .or_else(|| {
                             self.current_channels.iter()
                                 .find(|c| c.name == *channel_name)
@@ -3168,10 +3168,12 @@ impl IPTVApp {
                         .or_else(|| {
                             // Search EPG data for matching channel name
                             if let Some(ref epg) = self.epg_data {
+                                let channel_name_lower = channel_name.to_lowercase();
                                 epg.channels.iter()
                                     .find(|(_id, ch)| {
-                                        ch.name.to_lowercase().contains(&channel_name.to_lowercase()) ||
-                                        channel_name.to_lowercase().contains(&ch.name.to_lowercase())
+                                        let ch_name_lower = ch.name.to_lowercase();
+                                        ch_name_lower.contains(&channel_name_lower) ||
+                                        channel_name_lower.contains(&ch_name_lower)
                                     })
                                     .map(|(id, _)| id.clone())
                             } else {
@@ -3196,9 +3198,42 @@ impl IPTVApp {
                         }
                         
                         if response.double_clicked() {
-                            // Find and play the channel
-                            if let Some(ch) = self.current_channels.iter().find(|c| c.name == *channel_name) {
-                                let channel = ch.clone();
+                            // Find and play the channel - check current_channels first, then favorites/recent
+                            let channel_opt = self.current_channels.iter()
+                                .find(|c| c.name == *channel_name)
+                                .cloned()
+                                .or_else(|| {
+                                    // Check favorites
+                                    self.favorites.iter()
+                                        .find(|f| f.name == *channel_name && f.stream_type == "live")
+                                        .map(|f| Channel {
+                                            name: f.name.clone(),
+                                            url: f.url.clone(),
+                                            stream_id: f.stream_id,
+                                            category_id: None,
+                                            epg_channel_id: None,
+                                            stream_icon: None,
+                                            series_id: None,
+                                            container_extension: None,
+                                        })
+                                })
+                                .or_else(|| {
+                                    // Check recent
+                                    self.recent_watched.iter()
+                                        .find(|f| f.name == *channel_name && f.stream_type == "live")
+                                        .map(|f| Channel {
+                                            name: f.name.clone(),
+                                            url: f.url.clone(),
+                                            stream_id: f.stream_id,
+                                            category_id: None,
+                                            epg_channel_id: None,
+                                            stream_icon: None,
+                                            series_id: None,
+                                            container_extension: None,
+                                        })
+                                });
+                            
+                            if let Some(channel) = channel_opt {
                                 self.play_channel(&channel);
                             }
                         }
