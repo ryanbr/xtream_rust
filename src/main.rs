@@ -174,6 +174,24 @@ enum TaskResult {
     EpgError(String),
 }
 
+/// Context for background fetch operations - avoids cloning credentials repeatedly
+struct FetchContext {
+    server: String,
+    username: String,
+    password: String,
+    user_agent: String,
+    use_post: bool,
+    sender: std::sync::mpsc::Sender<TaskResult>,
+}
+
+impl FetchContext {
+    fn client(&self) -> XtreamClient {
+        XtreamClient::new(&self.server, &self.username, &self.password)
+            .with_user_agent(&self.user_agent)
+            .with_post_method(self.use_post)
+    }
+}
+
 // Predefined user agents
 const USER_AGENTS: &[(&str, &str)] = &[
     ("Chrome (Windows)", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"),
@@ -835,23 +853,28 @@ impl IPTVApp {
         });
     }
 
+    /// Helper to create fetch context with all credentials
+    fn fetch_context(&self) -> FetchContext {
+        FetchContext {
+            server: self.server.clone(),
+            username: self.username.clone(),
+            password: self.password.clone(),
+            user_agent: self.get_user_agent(),
+            use_post: self.use_post_method,
+            sender: self.task_sender.clone(),
+        }
+    }
+
     fn fetch_channels(&mut self, category_id: &str, stream_type: &str) {
         self.loading = true;
         self.status_message = "Loading channels...".to_string();
         
-        let server = self.server.clone();
-        let username = self.username.clone();
-        let password = self.password.clone();
-        let user_agent = self.get_user_agent();
-        let use_post = self.use_post_method;
+        let ctx = self.fetch_context();
         let category_id = category_id.to_string();
         let stream_type = stream_type.to_string();
-        let sender = self.task_sender.clone();
 
         thread::spawn(move || {
-            let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent)
-                .with_post_method(use_post);
+            let client = ctx.client();
             
             let result = match stream_type.as_str() {
                 "live" => client.get_live_streams(&category_id),
@@ -866,7 +889,7 @@ impl IPTVApp {
                     );
                     let url = format!(
                         "{}/{}/{}/{}/{}.{}",
-                        server, stream_type, username, password,
+                        ctx.server, stream_type, ctx.username, ctx.password,
                         s.stream_id, ext
                     );
                     
@@ -882,9 +905,9 @@ impl IPTVApp {
                     }
                 }).collect();
                 
-                let _ = sender.send(TaskResult::ChannelsLoaded(channels));
+                let _ = ctx.sender.send(TaskResult::ChannelsLoaded(channels));
             } else {
-                let _ = sender.send(TaskResult::Error("Failed to load channels".to_string()));
+                let _ = ctx.sender.send(TaskResult::Error("Failed to load channels".to_string()));
             }
         });
     }
@@ -893,23 +916,16 @@ impl IPTVApp {
         self.loading = true;
         self.status_message = "Loading series...".to_string();
         
-        let server = self.server.clone();
-        let username = self.username.clone();
-        let password = self.password.clone();
-        let user_agent = self.get_user_agent();
-        let use_post = self.use_post_method;
+        let ctx = self.fetch_context();
         let category_id = category_id.to_string();
-        let sender = self.task_sender.clone();
 
         thread::spawn(move || {
-            let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent)
-                .with_post_method(use_post);
+            let client = ctx.client();
             
             if let Ok(series) = client.get_series(&category_id) {
-                let _ = sender.send(TaskResult::SeriesListLoaded(series));
+                let _ = ctx.sender.send(TaskResult::SeriesListLoaded(series));
             } else {
-                let _ = sender.send(TaskResult::Error("Failed to load series".to_string()));
+                let _ = ctx.sender.send(TaskResult::Error("Failed to load series".to_string()));
             }
         });
     }
@@ -918,17 +934,10 @@ impl IPTVApp {
         self.loading = true;
         self.status_message = "Loading seasons...".to_string();
         
-        let server = self.server.clone();
-        let username = self.username.clone();
-        let password = self.password.clone();
-        let user_agent = self.get_user_agent();
-        let use_post = self.use_post_method;
-        let sender = self.task_sender.clone();
+        let ctx = self.fetch_context();
 
         thread::spawn(move || {
-            let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent)
-                .with_post_method(use_post);
+            let client = ctx.client();
             
             if let Ok(info) = client.get_series_info(series_id) {
                 if let Some(episodes) = info.get("episodes") {
@@ -937,13 +946,13 @@ impl IPTVApp {
                             .filter_map(|k| k.parse::<i32>().ok())
                             .collect();
                         seasons.sort();
-                        let _ = sender.send(TaskResult::SeasonsLoaded(seasons));
+                        let _ = ctx.sender.send(TaskResult::SeasonsLoaded(seasons));
                         return;
                     }
                 }
-                let _ = sender.send(TaskResult::Error("No seasons found".to_string()));
+                let _ = ctx.sender.send(TaskResult::Error("No seasons found".to_string()));
             } else {
-                let _ = sender.send(TaskResult::Error("Failed to load series info".to_string()));
+                let _ = ctx.sender.send(TaskResult::Error("Failed to load series info".to_string()));
             }
         });
     }
@@ -952,17 +961,10 @@ impl IPTVApp {
         self.loading = true;
         self.status_message = "Loading episodes...".to_string();
         
-        let server = self.server.clone();
-        let username = self.username.clone();
-        let password = self.password.clone();
-        let user_agent = self.get_user_agent();
-        let use_post = self.use_post_method;
-        let sender = self.task_sender.clone();
+        let ctx = self.fetch_context();
 
         thread::spawn(move || {
-            let client = XtreamClient::new(&server, &username, &password)
-                .with_user_agent(&user_agent)
-                .with_post_method(use_post);
+            let client = ctx.client();
             
             if let Ok(info) = client.get_series_info(series_id) {
                 if let Some(episodes) = info.get("episodes") {
@@ -991,14 +993,14 @@ impl IPTVApp {
                                 })
                             }).collect();
                             
-                            let _ = sender.send(TaskResult::EpisodesLoaded(eps));
+                            let _ = ctx.sender.send(TaskResult::EpisodesLoaded(eps));
                             return;
                         }
                     }
                 }
-                let _ = sender.send(TaskResult::Error("No episodes found".to_string()));
+                let _ = ctx.sender.send(TaskResult::Error("No episodes found".to_string()));
             } else {
-                let _ = sender.send(TaskResult::Error("Failed to load episodes".to_string()));
+                let _ = ctx.sender.send(TaskResult::Error("Failed to load episodes".to_string()));
             }
         });
     }
