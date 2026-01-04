@@ -3022,7 +3022,7 @@ impl IPTVApp {
         let adjusted_now = self.get_adjusted_now();
         
         // Fixed layout for scrollable grid
-        let channel_col_width = 125.0;  // Wider channel column for longer names
+        let channel_col_width = 137.0;  // Channel column width
         let prog_col_width = 130.0;
         let num_progs = 7; // Show 7 programs (current + 6 upcoming), user scrolls to see more
         
