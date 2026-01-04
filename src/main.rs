@@ -3336,7 +3336,11 @@ impl IPTVApp {
                         });
                         
                         // Progress bar
-                        let progress = elapsed as f32 / duration_mins as f32;
+                        let progress = if duration_mins > 0 {
+                            elapsed as f32 / duration_mins as f32
+                        } else {
+                            0.0
+                        };
                         ui.add(egui::ProgressBar::new(progress.clamp(0.0, 1.0))
                             .show_percentage());
                         
