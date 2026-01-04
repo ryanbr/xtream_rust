@@ -146,11 +146,13 @@ impl AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedCredential {
-    pub name: String,
     // Server credentials
     pub server: String,
     pub username: String,
     pub password: String,
+    // When this entry was saved (Unix timestamp)
+    #[serde(default)]
+    pub saved_at: i64,
     // Player settings
     #[serde(default)]
     pub external_player: String,

@@ -444,9 +444,6 @@ struct IPTVApp {
     show_m3u_dialog: bool,
     m3u_url_input: String,
     
-    // Address book - save name input
-    new_cred_name: String,
-    
     // Console log
     console_log: Vec<String>,
     
@@ -565,7 +562,6 @@ impl IPTVApp {
             show_address_book: false,
             show_m3u_dialog: false,
             m3u_url_input: String::new(),
-            new_cred_name: String::new(),
             console_log: vec!["[INFO] Xtreme IPTV Player started".to_string()],
             single_window_mode,
             current_player: None,
@@ -627,12 +623,17 @@ impl IPTVApp {
             
             // Also save to Address Book if server is set
             if !self.server.is_empty() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                
                 // Create credential entry
                 let cred = SavedCredential {
-                    name: format!("{}@{}", self.username, self.server),
                     server: self.server.clone(),
                     username: self.username.clone(),
                     password: self.password.clone(),
+                    saved_at: now,
                     external_player: self.external_player.clone(),
                     buffer_seconds: self.buffer_seconds,
                     connection_quality: self.connection_quality,
@@ -2095,51 +2096,53 @@ impl eframe::App for IPTVApp {
             egui::Window::new("📚 Address Book")
                 .collapsible(false)
                 .resizable(true)
-                .min_width(350.0)
+                .min_width(380.0)
                 .show(ctx, |ui| {
                     // Save current credentials section
                     ui.heading("Save Current Settings");
-                    ui.horizontal(|ui| {
-                        ui.label("Name:");
-                        ui.text_edit_singleline(&mut self.new_cred_name);
-                    });
                     
                     // Show what will be saved
                     if !self.server.is_empty() {
                         ui.label(egui::RichText::new(format!("{}@{}", self.username, self.server)).weak());
                     }
                     
-                    let can_save = !self.new_cred_name.is_empty() && !self.server.is_empty();
+                    let can_save = !self.server.is_empty();
                     ui.add_enabled_ui(can_save, |ui| {
                         if ui.button("💾 Save to Address Book").clicked() {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            
                             let cred = SavedCredential {
-                                name: self.new_cred_name.clone(),
-                                // Server credentials
                                 server: self.server.clone(),
                                 username: self.username.clone(),
                                 password: self.password.clone(),
-                                // Player settings
+                                saved_at: now,
                                 external_player: self.external_player.clone(),
                                 buffer_seconds: self.buffer_seconds,
                                 connection_quality: self.connection_quality,
-                                // User agent settings
                                 selected_user_agent: self.selected_user_agent,
                                 custom_user_agent: self.custom_user_agent.clone(),
                                 use_custom_user_agent: self.use_custom_user_agent,
                                 pass_user_agent_to_player: self.pass_user_agent_to_player,
-                                // EPG settings
                                 epg_url: self.epg_url_input.clone(),
                                 epg_time_offset: self.epg_time_offset,
                                 epg_auto_update_index: self.epg_auto_update.to_index(),
                             };
-                            self.address_book.push(cred);
+                            
+                            // Update existing or add new
+                            if let Some(existing) = self.address_book.iter_mut().find(|c| c.server == cred.server && c.username == cred.username) {
+                                *existing = cred;
+                            } else {
+                                self.address_book.push(cred);
+                            }
                             save_address_book(&self.address_book);
-                            self.new_cred_name.clear();
                             self.status_message = "Saved to address book".to_string();
                         }
                     });
                     
-                    if !can_save && self.server.is_empty() {
+                    if !can_save {
                         ui.label(egui::RichText::new("Enter server credentials first").small().weak());
                     }
                     
@@ -2156,7 +2159,7 @@ impl eframe::App for IPTVApp {
                     let mut to_load: Option<SavedCredential> = None;
                     
                     egui::ScrollArea::vertical()
-                        .max_height(200.0)
+                        .max_height(250.0)
                         .show(ui, |ui| {
                             for (i, cred) in self.address_book.iter().enumerate() {
                                 ui.horizontal(|ui| {
@@ -2165,10 +2168,16 @@ impl eframe::App for IPTVApp {
                                         to_load = Some(cred.clone());
                                     }
                                     
-                                    // Name and server info
+                                    // Server info and saved date
                                     ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new(&cred.name).strong());
-                                        ui.label(egui::RichText::new(format!("{}@{}", cred.username, cred.server)).weak());
+                                        ui.label(egui::RichText::new(format!("{}@{}", cred.username, cred.server)).strong());
+                                        // Format saved_at timestamp
+                                        let saved_str = if cred.saved_at > 0 {
+                                            Self::format_datetime(cred.saved_at)
+                                        } else {
+                                            "Unknown".to_string()
+                                        };
+                                        ui.label(egui::RichText::new(format!("Saved: {}", saved_str)).small().weak());
                                     });
                                     
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2182,6 +2191,7 @@ impl eframe::App for IPTVApp {
                         });
                     
                     if let Some(cred) = to_load {
+                        let cred_label = format!("{}@{}", cred.username, cred.server);
                         // Server credentials
                         self.server = cred.server;
                         self.username = cred.username;
@@ -2202,16 +2212,18 @@ impl eframe::App for IPTVApp {
                         // Clear EPG data since we're loading new provider
                         self.epg_data = None;
                         self.epg_last_update = None;
+                        self.epg_startup_loaded = false; // Allow auto-load for new provider
                         
-                        self.status_message = format!("Loaded '{}'", cred.name);
+                        self.status_message = format!("Loaded '{}'", cred_label);
                         self.show_address_book = false;
                     }
                     
                     if let Some(i) = to_delete {
-                        let name = self.address_book[i].name.clone();
+                        let cred = &self.address_book[i];
+                        let cred_label = format!("{}@{}", cred.username, cred.server);
                         self.address_book.remove(i);
                         save_address_book(&self.address_book);
-                        self.status_message = format!("Removed '{}'", name);
+                        self.status_message = format!("Removed '{}'", cred_label);
                     }
                     
                     ui.separator();
@@ -3220,6 +3232,43 @@ impl IPTVApp {
         let hours = secs / 3600;
         let mins = (secs % 3600) / 60;
         format!("{:02}:{:02}", hours, mins)
+    }
+    
+    fn format_datetime(ts: i64) -> String {
+        // Convert Unix timestamp to readable date/time
+        let secs_per_day = 86400;
+        let days_since_epoch = ts / secs_per_day;
+        let secs_today = ts % secs_per_day;
+        
+        let hours = secs_today / 3600;
+        let mins = (secs_today % 3600) / 60;
+        
+        // Simple date calculation (approximate, doesn't account for leap years perfectly)
+        let mut year = 1970;
+        let mut remaining_days = days_since_epoch;
+        
+        loop {
+            let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
+            if remaining_days < days_in_year {
+                break;
+            }
+            remaining_days -= days_in_year;
+            year += 1;
+        }
+        
+        let days_in_months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut month = 1;
+        for &days in &days_in_months {
+            let days = if month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 29 } else { days };
+            if remaining_days < days {
+                break;
+            }
+            remaining_days -= days;
+            month += 1;
+        }
+        let day = remaining_days + 1;
+        
+        format!("{:04}-{:02}-{:02} {:02}:{:02}", year, month, day, hours, mins)
     }
 }
 
