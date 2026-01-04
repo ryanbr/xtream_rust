@@ -1,8 +1,9 @@
-//! M3U playlist parser
+//! M3U playlist parser with HTTPS download support
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct M3uChannel {
@@ -18,6 +19,32 @@ pub struct M3uCredentials {
     pub server: String,
     pub username: String,
     pub password: String,
+}
+
+/// Download and parse M3U from URL (supports HTTP and HTTPS)
+pub fn download_and_parse(url: &str, user_agent: &str) -> Result<Vec<M3uChannel>, String> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(120)))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent();
+
+    let mut response = agent
+        .get(url)
+        .header("User-Agent", user_agent)
+        .call()
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if response.status() != 200 {
+        return Err(format!("HTTP error: {}", response.status()));
+    }
+
+    let content = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Read failed: {}", e))?;
+
+    Ok(parse_m3u(&content))
 }
 
 /// Parse M3U content and extract channels
