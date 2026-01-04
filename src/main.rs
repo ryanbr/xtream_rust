@@ -299,8 +299,8 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
     viewport: egui::ViewportBuilder::default()
-        .with_inner_size([1020.0, 650.0])
-        .with_min_inner_size([800.0, 500.0])
+        .with_inner_size([1150.0, 700.0])
+        .with_min_inner_size([900.0, 550.0])
         .with_icon(icon),
     vsync: true,
     hardware_acceleration: eframe::HardwareAcceleration::Preferred,
@@ -472,6 +472,7 @@ struct IPTVApp {
     epg_time_offset: f32,
     epg_auto_update: EpgAutoUpdate,
     epg_last_update: Option<i64>,
+    epg_startup_loaded: bool,
     selected_epg_channel: Option<String>,
 }
 
@@ -583,6 +584,7 @@ impl IPTVApp {
             epg_time_offset: epg_time_offset,
             epg_auto_update: EpgAutoUpdate::from_index(epg_auto_update_index),
             epg_last_update: None,
+            epg_startup_loaded: false,
             selected_epg_channel: None,
         }
     }
@@ -1731,8 +1733,15 @@ impl eframe::App for IPTVApp {
             }
         }
         
-        // EPG auto-update check
-        if !self.epg_loading && !self.epg_url_input.is_empty() {
+        // EPG auto-load on startup if URL is saved
+        if !self.epg_loading && !self.epg_url_input.is_empty() && self.epg_data.is_none() && !self.epg_startup_loaded {
+            self.epg_startup_loaded = true;
+            self.log("[INFO] Loading saved EPG on startup");
+            self.load_epg();
+        }
+        
+        // EPG auto-update check (periodic refresh)
+        if !self.epg_loading && !self.epg_url_input.is_empty() && self.epg_data.is_some() {
             if let Some(interval_secs) = self.epg_auto_update.as_secs() {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1741,7 +1750,7 @@ impl eframe::App for IPTVApp {
                 
                 let should_update = match self.epg_last_update {
                     Some(last) => (now - last) >= interval_secs,
-                    None => self.epg_data.is_none(), // Only auto-load if no data yet
+                    None => false,
                 };
                 
                 if should_update {
@@ -2005,28 +2014,51 @@ impl eframe::App for IPTVApp {
                  self.current_tab == Tab::Recent);
             
             if show_epg_panel {
-                // Two-column layout: channels on left, EPG on right
-                egui::SidePanel::right("epg_panel")
+                // Two-column layout: channels fixed on left, EPG fills remaining space
+                egui::SidePanel::left("channels_panel")
                     .resizable(true)
-                    .default_width(400.0)
-                    .min_width(300.0)
+                    .default_width(350.0)
+                    .min_width(250.0)
+                    .max_width(500.0)
+                    .show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                match self.current_tab {
+                                    Tab::Live => self.show_live_tab(ui),
+                                    Tab::Movies => self.show_movies_tab(ui),
+                                    Tab::Series => self.show_series_tab(ui),
+                                    Tab::Favorites => self.show_favorites_tab(ui),
+                                    Tab::Recent => self.show_recent_tab(ui),
+                                    Tab::Info => self.show_info_tab(ui),
+                                    Tab::Console => self.show_console_tab(ui),
+                                }
+                            });
+                    });
+                
+                // EPG grid fills remaining space on right
+                egui::CentralPanel::default()
                     .show_inside(ui, |ui| {
                         self.show_epg_grid_panel(ui);
                     });
+            } else {
+                // No EPG - full width for content
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        match self.current_tab {
+                            Tab::Live => self.show_live_tab(ui),
+                            Tab::Movies => self.show_movies_tab(ui),
+                            Tab::Series => self.show_series_tab(ui),
+                            Tab::Favorites => self.show_favorites_tab(ui),
+                            Tab::Recent => self.show_recent_tab(ui),
+                            Tab::Info => self.show_info_tab(ui),
+                            Tab::Console => self.show_console_tab(ui),
+                        }
+                    });
             }
-            
-            // Main content (channels/categories)
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                match self.current_tab {
-                    Tab::Live => self.show_live_tab(ui),
-                    Tab::Movies => self.show_movies_tab(ui),
-                    Tab::Series => self.show_series_tab(ui),
-                    Tab::Favorites => self.show_favorites_tab(ui),
-                    Tab::Recent => self.show_recent_tab(ui),
-                    Tab::Info => self.show_info_tab(ui),
-                    Tab::Console => self.show_console_tab(ui),
-                }
-            });
         });
 
         // Address Book Window
@@ -2504,12 +2536,20 @@ impl IPTVApp {
                     
                     ui.label(egui::RichText::new(&display_name).strong());
                     
-                    // Show EPG info if available (only for live streams)
+                    // Show EPG info if available (only for live streams) - truncated to avoid overlap
                     if stream_type == "live" {
                         if let Some(epg_id) = &channel.epg_channel_id {
                             if let Some(program) = self.get_current_program(epg_id) {
+                                // Truncate title for inline display
+                                let short_title: String = program.title.chars().take(20).collect();
+                                let display_title = if program.title.len() > 20 {
+                                    format!("{}…", short_title)
+                                } else {
+                                    short_title
+                                };
+                                
                                 ui.label(" | ");
-                                ui.label(egui::RichText::new(&program.title)
+                                ui.label(egui::RichText::new(&display_title)
                                     .color(egui::Color32::LIGHT_BLUE)
                                     .italics());
                                 
@@ -2958,14 +2998,21 @@ impl IPTVApp {
         ui.separator();
         
         let adjusted_now = self.get_adjusted_now();
+        let available_width = ui.available_width();
+        
+        // Calculate how many program columns we can fit
+        let channel_col_width = 100.0;
+        let prog_col_width = 130.0; // Wider columns for more text
+        let num_progs = ((available_width - channel_col_width) / prog_col_width).floor() as usize;
+        let num_progs = num_progs.clamp(2, 4);
         
         // Time header
         ui.horizontal(|ui| {
-            ui.label("              "); // Spacer for channel name column
+            ui.set_min_width(channel_col_width);
+            ui.label(""); // Spacer for channel name column
             let time_labels = ["Now", "+30m", "+60m", "+90m"];
-            for label in time_labels {
-                ui.label(egui::RichText::new(label).small().strong());
-                ui.add_space(40.0);
+            for label in time_labels.iter().take(num_progs) {
+                ui.add_sized([prog_col_width, 18.0], egui::Label::new(egui::RichText::new(*label).small().strong()));
             }
         });
         
@@ -2997,6 +3044,7 @@ impl IPTVApp {
         // EPG Grid
         egui::ScrollArea::vertical()
             .id_salt("epg_grid_scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (channel_name, epg_id_opt) in &channels_to_show {
                     // Try to find EPG ID from current_channels if not provided
@@ -3009,32 +3057,32 @@ impl IPTVApp {
                     let is_selected = self.selected_epg_channel.as_ref() == Some(channel_name);
                     
                     ui.horizontal(|ui| {
-                        // Channel name (clickable)
+                        // Channel name (clickable) - fixed width
                         let name_text = Self::sanitize_text(channel_name);
-                        let short_name: String = name_text.chars().take(12).collect();
+                        let short_name: String = name_text.chars().take(10).collect();
                         
-                        let response = ui.selectable_label(is_selected, 
-                            egui::RichText::new(&short_name).strong());
-                        if response.clicked() {
+                        ui.add_sized([channel_col_width - 10.0, 20.0], egui::SelectableLabel::new(
+                            is_selected, 
+                            egui::RichText::new(&short_name).strong()
+                        )).clicked().then(|| {
                             self.selected_epg_channel = Some(channel_name.clone());
-                        }
+                        });
                         
-                        ui.separator();
-                        
-                        // Program blocks
+                        // Program blocks - fixed width each
                         if let Some(ref id) = epg_id {
-                            let programs = self.get_upcoming_programs(id, 4);
+                            let programs = self.get_upcoming_programs(id, num_progs);
                             
                             for (idx, prog) in programs.iter().enumerate() {
                                 let is_current = prog.start <= adjusted_now && prog.stop > adjusted_now;
                                 let duration_mins = (prog.stop - prog.start) / 60;
                                 
-                                // Calculate width based on duration (roughly 1 pixel per minute, min 50)
-                                let width = (duration_mins as f32 * 1.0).clamp(50.0, 120.0);
+                                // Fixed width for each program block
+                                let width = prog_col_width - 6.0;
                                 
-                                // Truncate title to fit
-                                let title: String = prog.title.chars().take(12).collect();
-                                let display = if prog.title.len() > 12 {
+                                // Truncate title to fit - allow more chars (roughly 6px per char)
+                                let max_chars = ((width - 8.0) / 5.5) as usize;
+                                let title: String = prog.title.chars().take(max_chars).collect();
+                                let display = if prog.title.len() > max_chars {
                                     format!("{}…", title)
                                 } else {
                                     title
@@ -3056,14 +3104,13 @@ impl IPTVApp {
                                 
                                 egui::Frame::none()
                                     .fill(bg_color)
-                                    .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-                                    .rounding(2.0)
+                                    .inner_margin(egui::Margin::symmetric(4.0, 3.0))
+                                    .rounding(3.0)
                                     .show(ui, |ui| {
                                         ui.set_min_width(width);
                                         ui.set_max_width(width);
                                         let response = ui.label(
                                             egui::RichText::new(&display)
-                                                .small()
                                                 .color(text_color)
                                         );
                                         response.on_hover_text(format!(
