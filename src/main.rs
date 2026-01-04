@@ -343,6 +343,9 @@ struct IPTVApp {
     recent_watched: Vec<FavoriteItem>,
     
     navigation_stack: Vec<NavigationLevel>,
+    scroll_positions: Vec<f32>,  // Store scroll Y position for each navigation level
+    pending_scroll_restore: Option<f32>,  // Scroll position to restore after navigation
+    current_scroll_offset: f32,  // Track current scroll offset
     
     // Info
     user_info: UserInfo,
@@ -475,6 +478,9 @@ impl IPTVApp {
             favorites,
             recent_watched,
             navigation_stack: Vec::new(),
+            scroll_positions: Vec::new(),
+            pending_scroll_restore: None,
+            current_scroll_offset: 0.0,
             user_info: UserInfo::default(),
             server_info: ServerInfo::default(),
             search_query: String::new(),
@@ -1536,6 +1542,11 @@ impl IPTVApp {
 
     fn go_back(&mut self) {
         if self.navigation_stack.pop().is_some() {
+            // Restore scroll position for the previous level
+            if let Some(scroll_y) = self.scroll_positions.pop() {
+                self.pending_scroll_restore = Some(scroll_y);
+            }
+            
             // Handle what to show based on remaining stack
             if let Some(level) = self.navigation_stack.last() {
                 match level {
@@ -1556,6 +1567,12 @@ impl IPTVApp {
             }
         }
         self.search_query.clear();
+    }
+    
+    /// Save current scroll position before navigating into a folder
+    fn save_scroll_position(&mut self, _ctx: &egui::Context) {
+        // Save the current scroll offset tracked from the scroll area
+        self.scroll_positions.push(self.current_scroll_offset);
     }
 
     fn extract_m3u_credentials(&mut self, url: &str) {
@@ -2020,10 +2037,18 @@ impl eframe::App for IPTVApp {
                     .min_width(200.0)
                     .max_width(450.0)
                     .show_inside(ui, |ui| {
-                        egui::ScrollArea::vertical()
+                        // Restore scroll position if pending
+                        let scroll_offset = self.pending_scroll_restore.take();
+                        
+                        let mut scroll_area = egui::ScrollArea::vertical()
                             .id_salt("channels_scroll")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
+                            .auto_shrink([false, false]);
+                        
+                        if let Some(offset) = scroll_offset {
+                            scroll_area = scroll_area.vertical_scroll_offset(offset);
+                        }
+                        
+                        let scroll_output = scroll_area.show(ui, |ui| {
                                 ui.set_min_width(ui.available_width() - 15.0); // Leave room for scrollbar
                                 match self.current_tab {
                                     Tab::Live => self.show_live_tab(ui),
@@ -2035,6 +2060,9 @@ impl eframe::App for IPTVApp {
                                     Tab::Console => self.show_console_tab(ui),
                                 }
                             });
+                        
+                        // Track current scroll position
+                        self.current_scroll_offset = scroll_output.state.offset.y;
                     });
                 
                 // EPG grid fills remaining space on right
@@ -2044,9 +2072,18 @@ impl eframe::App for IPTVApp {
                     });
             } else {
                 // No EPG - full width for content
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                // Restore scroll position if pending
+                let scroll_offset = self.pending_scroll_restore.take();
+                
+                let mut scroll_area = egui::ScrollArea::vertical()
+                    .id_salt("channels_scroll")
+                    .auto_shrink([false, false]);
+                
+                if let Some(offset) = scroll_offset {
+                    scroll_area = scroll_area.vertical_scroll_offset(offset);
+                }
+                
+                let scroll_output = scroll_area.show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         match self.current_tab {
                             Tab::Live => self.show_live_tab(ui),
@@ -2058,6 +2095,9 @@ impl eframe::App for IPTVApp {
                             Tab::Console => self.show_console_tab(ui),
                         }
                     });
+                
+                // Track current scroll position
+                self.current_scroll_offset = scroll_output.state.offset.y;
             }
         });
 
@@ -2619,6 +2659,7 @@ impl IPTVApp {
         }
         
         if let Some((cat_id, cat_name)) = clicked_category {
+            self.save_scroll_position(ui.ctx());
             self.navigation_stack.push(NavigationLevel::Channels(cat_name));
             self.fetch_channels(&cat_id, stream_type);
         }
@@ -2668,6 +2709,7 @@ impl IPTVApp {
                 }
                 
                 if let Some(s) = clicked_season {
+                    self.save_scroll_position(ui.ctx());
                     self.navigation_stack.push(NavigationLevel::Episodes(sid, s));
                     self.fetch_episodes(sid, s);
                 }
@@ -2691,6 +2733,7 @@ impl IPTVApp {
             }
             
             if let Some(sid) = clicked_series {
+                self.save_scroll_position(ui.ctx());
                 self.navigation_stack.push(NavigationLevel::Seasons(sid));
                 self.fetch_series_info(sid);
             }
@@ -2712,6 +2755,7 @@ impl IPTVApp {
         }
         
         if let Some((cat_id, cat_name)) = clicked_category {
+            self.save_scroll_position(ui.ctx());
             self.navigation_stack.push(NavigationLevel::Series(cat_name));
             self.fetch_series_list(&cat_id);
         }
