@@ -12,6 +12,15 @@ pub struct M3uChannel {
     pub group: Option<String>,
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
+    pub tvg_name: Option<String>,      // Alternate name for EPG matching
+    pub catchup: Option<String>,        // Catchup type (default, shift, etc.)
+    pub catchup_days: Option<u32>,      // Days of catchup available
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct M3uPlaylist {
+    pub channels: Vec<M3uChannel>,
+    pub epg_url: Option<String>,        // From x-tvg-url in header
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +32,12 @@ pub struct M3uCredentials {
 
 /// Download and parse M3U from URL (supports HTTP and HTTPS)
 pub fn download_and_parse(url: &str, user_agent: &str) -> Result<Vec<M3uChannel>, String> {
+    let playlist = download_and_parse_playlist(url, user_agent)?;
+    Ok(playlist.channels)
+}
+
+/// Download and parse M3U playlist with EPG URL extraction
+pub fn download_and_parse_playlist(url: &str, user_agent: &str) -> Result<M3uPlaylist, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(120)))
         .timeout_connect(Some(Duration::from_secs(30)))
@@ -44,7 +59,36 @@ pub fn download_and_parse(url: &str, user_agent: &str) -> Result<Vec<M3uChannel>
         .read_to_string()
         .map_err(|e| format!("Read failed: {}", e))?;
 
-    Ok(parse_m3u(&content))
+    Ok(parse_m3u_playlist(&content))
+}
+
+/// Parse M3U and return playlist with EPG URL
+pub fn parse_m3u_playlist(content: &str) -> M3uPlaylist {
+    let mut playlist = M3uPlaylist::default();
+    
+    // Check first line for EPG URL
+    if let Some(first_line) = content.lines().next() {
+        if first_line.starts_with("#EXTM3U") {
+            // Extract x-tvg-url="..." or url-tvg="..."
+            playlist.epg_url = extract_header_attr(first_line, "x-tvg-url")
+                .or_else(|| extract_header_attr(first_line, "url-tvg"));
+        }
+    }
+    
+    playlist.channels = parse_m3u(content);
+    playlist
+}
+
+/// Extract attribute from #EXTM3U header line
+fn extract_header_attr(line: &str, attr_name: &str) -> Option<String> {
+    let search = format!("{}=\"", attr_name);
+    if let Some(start) = line.to_lowercase().find(&search) {
+        let rest = &line[start + search.len()..];
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
 }
 
 /// Parse M3U content and extract channels
@@ -61,30 +105,8 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
             let info_part = &line[8..];
             current_attrs.clear();
 
-            // Extract attributes like tvg-id="...", group-title="..."
-            let mut remaining = info_part;
-            while let Some(eq_pos) = remaining.find('=') {
-                // Find the key (word before =)
-                let key_start = remaining[..eq_pos]
-                    .rfind(|c: char| c.is_whitespace())
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
-                let key = &remaining[key_start..eq_pos];
-
-                // Find the value (quoted string after =)
-                let value_start = eq_pos + 1;
-                if remaining[value_start..].starts_with('"') {
-                    if let Some(end) = remaining[value_start + 1..].find('"') {
-                        let value = &remaining[value_start + 1..value_start + 1 + end];
-                        current_attrs.insert(key.to_string(), value.to_string());
-                        remaining = &remaining[value_start + 2 + end..];
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
+            // Extract attributes using robust parser
+            extract_attrs(info_part, &mut current_attrs);
 
             // Extract channel name (after the last comma)
             if let Some(comma_pos) = info_part.rfind(',') {
@@ -99,12 +121,104 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
                     group: current_attrs.get("group-title").cloned(),
                     tvg_id: current_attrs.get("tvg-id").cloned(),
                     tvg_logo: current_attrs.get("tvg-logo").cloned(),
+                    tvg_name: current_attrs.get("tvg-name").cloned(),
+                    catchup: current_attrs.get("catchup").cloned(),
+                    catchup_days: current_attrs.get("catchup-days")
+                        .and_then(|s| s.parse().ok()),
                 });
             }
         }
     }
 
     channels
+}
+
+/// Extract attributes from EXTINF line - handles quoted and unquoted values
+fn extract_attrs(info: &str, attrs: &mut HashMap<String, String>) {
+    let mut chars = info.chars().peekable();
+    
+    while chars.peek().is_some() {
+        // Skip whitespace and commas
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() || c == ',' || c == '-' && attrs.is_empty() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        
+        // Skip the duration number at the start (e.g., "-1")
+        if attrs.is_empty() {
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() || c == '-' || c == '.' {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            // Skip whitespace after duration
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        // Collect key until '='
+        let mut key = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '=' {
+                chars.next(); // consume '='
+                break;
+            }
+            if c == ',' {
+                // No more attributes, rest is channel name
+                return;
+            }
+            key.push(chars.next().unwrap());
+        }
+        
+        let key = key.trim().to_lowercase();
+        if key.is_empty() { 
+            continue; 
+        }
+        
+        // Get value - check if quoted
+        match chars.peek() {
+            Some(&'"') => {
+                chars.next(); // consume opening quote
+                let mut value = String::new();
+                while let Some(c) = chars.next() {
+                    if c == '"' { break; }
+                    // Handle escaped quotes
+                    if c == '\\' {
+                        if let Some(&next) = chars.peek() {
+                            if next == '"' {
+                                value.push(chars.next().unwrap());
+                                continue;
+                            }
+                        }
+                    }
+                    value.push(c);
+                }
+                attrs.insert(key, value);
+            }
+            Some(_) => {
+                // Unquoted value - read until space or comma
+                let mut value = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_whitespace() || c == ',' { break; }
+                    value.push(chars.next().unwrap());
+                }
+                if !value.is_empty() {
+                    attrs.insert(key, value);
+                }
+            }
+            None => {}
+        }
+    }
 }
 
 /// Extract credentials from M3U Plus URL
@@ -231,5 +345,31 @@ http://example.com/live/user/pass/2.ts
         assert_eq!(channels.len(), 2);
         assert_eq!(channels[0].name, "CNN");
         assert_eq!(channels[0].group, Some("News".to_string()));
+    }
+
+    #[test]
+    fn test_parse_m3u_with_epg_url() {
+        let content = r#"#EXTM3U x-tvg-url="http://example.com/epg.xml"
+#EXTINF:-1 tvg-id="ch1" tvg-name="Channel One" group-title="General" catchup="default" catchup-days="7",Channel 1
+http://example.com/live/user/pass/1.ts
+"#;
+        let playlist = parse_m3u_playlist(content);
+        assert_eq!(playlist.epg_url, Some("http://example.com/epg.xml".to_string()));
+        assert_eq!(playlist.channels.len(), 1);
+        assert_eq!(playlist.channels[0].tvg_name, Some("Channel One".to_string()));
+        assert_eq!(playlist.channels[0].catchup, Some("default".to_string()));
+        assert_eq!(playlist.channels[0].catchup_days, Some(7));
+    }
+
+    #[test]
+    fn test_parse_attrs_unquoted() {
+        let content = r#"#EXTM3U
+#EXTINF:-1 tvg-id=unquoted group-title="Quoted Group",Test Channel
+http://example.com/stream.ts
+"#;
+        let channels = parse_m3u(content);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].tvg_id, Some("unquoted".to_string()));
+        assert_eq!(channels[0].group, Some("Quoted Group".to_string()));
     }
 }
