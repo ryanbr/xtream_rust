@@ -1208,6 +1208,16 @@ impl IPTVApp {
         let player_lower = player.to_lowercase();
         let mut cmd = Command::new(&player);
         
+        // On Windows, hide the console window for ffplay/ffmpeg
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            if player_lower.contains("ffplay") || player_lower.contains("ffmpeg") {
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+        }
+        
         // Get effective buffer based on connection quality
         let buffer_secs = self.get_effective_buffer();
         let buffer_ms = (buffer_secs * 1000) as i64;
@@ -1259,9 +1269,21 @@ impl IPTVApp {
                 ]);
             }
             
-            // Note: Hardware acceleration disabled for ffplay - causes black screen
-            // on many Windows setups due to Vulkan renderer incompatibility.
-            // Software decoding is fast enough for most streams.
+            // Hardware acceleration - disabled on Windows (black screen with Vulkan renderer)
+            // Works on Linux/Mac
+            if self.hw_accel {
+                #[cfg(target_os = "macos")]
+                {
+                    args.insert(0, "videotoolbox".to_string());
+                    args.insert(0, "-hwaccel".to_string());
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    args.insert(0, "auto".to_string());
+                    args.insert(0, "-hwaccel".to_string());
+                }
+                // Windows: skip hwaccel - causes black screen
+            }
             
             for arg in args {
                 cmd.arg(arg);
