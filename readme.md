@@ -28,20 +28,6 @@ A fast, lightweight, cross-platform IPTV player with Xtream Codes API support bu
 
 <img width="1245" height="710" alt="xtremeip-screen" src="https://github.com/user-attachments/assets/3fd6b91f-9925-49bc-9476-78e58d0648e1" />
 
-## Comparison: Rust vs Other IPTV Players
-
-| Feature | Xtreme IPTV (Rust) | Typical Electron App | Native C++ App |
-|---------|-------------------|---------------------|----------------|
-| **Binary Size** | ~4 MB | ~150+ MB | ~10-20 MB |
-| **RAM Usage** | ~30-50 MB | ~200-500 MB | ~50-100 MB |
-| **Startup Time** | <1 second | 3-5 seconds | 1-2 seconds |
-| **CPU Idle** | <1% | 2-5% | 1-2% |
-| **Dependencies** | None (standalone) | Node.js, Chromium | Various libs |
-| **Cross-platform** | ✅ Single codebase | ✅ Single codebase | ❌ Per-platform |
-| **Memory Safety** | ✅ Guaranteed | ✅ (JS runtime) | ❌ Manual |
-| **HW Acceleration** | ✅ GPU decoding | ⚠️ Varies | ✅ GPU decoding |
-| **No Console Window** | ✅ Windows | ✅ | ⚠️ Varies |
-
 ## Supported Platforms
 
 | Platform | Architecture | Status | Binary |
