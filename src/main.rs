@@ -1305,10 +1305,12 @@ impl IPTVApp {
                 
                 // === THREADS ===
                 "-threads".to_string(), "0".to_string(), // Auto
-                
-                // Window title
-                "-window_title".to_string(), channel.name.clone(),
             ];
+            
+            // Window title with stream filename
+            let stream_name = channel.url.split('/').last().unwrap_or("stream");
+            let title = format!("{} - {}", channel.name, stream_name);
+            args.extend(["-window_title".to_string(), title]);
             
             // Add reconnect options for HTTP streams
             if channel.url.starts_with("http") {
@@ -1354,9 +1356,13 @@ impl IPTVApp {
             let cache_secs = buffer_secs * 2; // Double cache
             let cache_mb = buffer_secs * 4;   // 4MB per buffer second
             
+            // Title with stream filename
+            let stream_name = channel.url.split('/').last().unwrap_or("stream");
+            let title = format!("{} - {}", channel.name, stream_name);
+            
             let mut args = vec![
                 channel.url.clone(),
-                format!("--title={}", channel.name),
+                format!("--title={}", title),
                 
                 // === CACHE SETTINGS (most important) ===
                 "--cache=yes".to_string(),
@@ -1432,8 +1438,13 @@ impl IPTVApp {
             // VLC buffer settings - simple and reliable
             let cache_ms = buffer_ms * 2;
             
+            // Extract filename from URL for title
+            let stream_name = channel.url.split('/').last().unwrap_or("stream");
+            let title = format!("{} - {}", channel.name, stream_name);
+            
             let mut args = vec![
                 channel.url.clone(),
+                format!("--meta-title={}", title),
                 format!("--network-caching={}", cache_ms),
                 format!("--live-caching={}", cache_ms),
                 "--http-reconnect".to_string(),
@@ -1453,19 +1464,25 @@ impl IPTVApp {
                 cmd.arg(arg);
             }
         } else if player_lower.contains("potplayer") {
-            // PotPlayer (Windows) - doesn't use user agent arg
+            // PotPlayer (Windows)
+            let stream_name = channel.url.split('/').last().unwrap_or("stream");
+            let title = format!("{} - {}", channel.name, stream_name);
             cmd.arg(&channel.url);
+            cmd.arg(format!("/title={}", title));
         } else if player_lower.contains("mpc-hc") || player_lower.contains("mpc-be") {
-            // MPC-HC / MPC-BE (Windows) - doesn't support user agent arg
+            // MPC-HC / MPC-BE (Windows)
             cmd.arg(&channel.url);
+            // MPC doesn't have a direct title arg, but we can try
         } else if player_lower.contains("mplayer") {
             // MPlayer settings
             let cache_min = if is_slow { "50" } else { "20" };
+            let stream_name = channel.url.split('/').last().unwrap_or("stream");
+            let title = format!("{} - {}", channel.name, stream_name);
             let mut args = vec![
                 channel.url.clone(),
                 "-cache".to_string(), format!("{}", buffer_secs * 1024),
                 "-cache-min".to_string(), cache_min.to_string(),
-                "-title".to_string(), channel.name.clone(),
+                "-title".to_string(), title,
             ];
             
             if self.pass_user_agent_to_player {
@@ -1477,12 +1494,15 @@ impl IPTVApp {
             }
         } else if player_lower.contains("celluloid") || player_lower.contains("gnome-mpv") {
             // Celluloid (GNOME MPV frontend) - passes args to mpv
+            let stream_name = channel.url.split('/').last().unwrap_or("stream");
+            let title = format!("{} - {}", channel.name, stream_name);
             cmd.args([
                 &channel.url,
+                &format!("--mpv-title={}", title),
                 &format!("--mpv-cache-secs={}", buffer_secs),
             ]);
         } else {
-            // Generic player - just pass URL (no user agent, might not be supported)
+            // Generic player - just pass URL
             cmd.arg(&channel.url);
         }
 
