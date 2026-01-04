@@ -3054,25 +3054,14 @@ impl IPTVApp {
         ui.separator();
         
         let adjusted_now = self.get_adjusted_now();
-        let available_width = ui.available_width();
         
-        // Calculate how many program columns we can fit
+        // Fixed layout for scrollable grid
         let channel_col_width = 100.0;
-        let prog_col_width = 130.0; // Wider columns for more text
-        let num_progs = ((available_width - channel_col_width) / prog_col_width).floor() as usize;
-        let num_progs = num_progs.clamp(2, 4);
+        let prog_col_width = 130.0;
+        let num_progs = 7; // Show 7 programs (current + 6 upcoming), user scrolls to see more
         
-        // Time header
-        ui.horizontal(|ui| {
-            ui.set_min_width(channel_col_width);
-            ui.label(""); // Spacer for channel name column
-            let time_labels = ["Now", "+30m", "+60m", "+90m"];
-            for label in time_labels.iter().take(num_progs) {
-                ui.add_sized([prog_col_width, 18.0], egui::Label::new(egui::RichText::new(*label).small().strong()));
-            }
-        });
-        
-        ui.separator();
+        // Time header labels
+        let time_labels = ["Now", "+30m", "+60m", "+90m", "+2h", "+2.5h", "+3h"];
         
         // Get channels to display based on current view
         let channels_to_show: Vec<(String, Option<String>)> = match self.current_tab {
@@ -3091,19 +3080,29 @@ impl IPTVApp {
                 items.iter()
                     .filter(|f| f.stream_type == "live")
                     .take(20)
-                    .map(|f| (f.name.clone(), None)) // Favorites don't store epg_channel_id directly
+                    .map(|f| (f.name.clone(), None))
                     .collect()
             }
             _ => Vec::new(),
         };
         
-        // EPG Grid
-        egui::ScrollArea::vertical()
+        // Horizontal + Vertical scroll area for the entire grid
+        egui::ScrollArea::both()
             .id_salt("epg_grid_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // Time header row
+                ui.horizontal(|ui| {
+                    ui.add_sized([channel_col_width, 18.0], egui::Label::new("")); // Channel column spacer
+                    for label in time_labels.iter() {
+                        ui.add_sized([prog_col_width, 18.0], egui::Label::new(egui::RichText::new(*label).small().strong()));
+                    }
+                });
+                
+                ui.separator();
+                
+                // Channel rows
                 for (channel_name, epg_id_opt) in &channels_to_show {
-                    // Try to find EPG ID from current_channels if not provided
                     let epg_id = epg_id_opt.clone().or_else(|| {
                         self.current_channels.iter()
                             .find(|c| c.name == *channel_name)
