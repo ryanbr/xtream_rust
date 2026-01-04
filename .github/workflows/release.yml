@@ -170,7 +170,7 @@ jobs:
   release:
     needs: [build-linux, build-windows, build-macos, build-macos-universal]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       
@@ -196,6 +196,7 @@ jobs:
           sha256sum * > SHA256SUMS.txt
       
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           files: release/*
@@ -206,7 +207,7 @@ jobs:
   publish-npm:
     needs: release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       
