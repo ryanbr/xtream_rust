@@ -2062,14 +2062,15 @@ impl eframe::App for IPTVApp {
                 // Two-column layout: channels fixed on left, EPG fills remaining space
                 egui::SidePanel::left("channels_panel")
                     .resizable(true)
-                    .default_width(350.0)
-                    .min_width(250.0)
-                    .max_width(500.0)
+                    .default_width(300.0)
+                    .min_width(200.0)
+                    .max_width(450.0)
                     .show_inside(ui, |ui| {
                         egui::ScrollArea::vertical()
+                            .id_salt("channels_scroll")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
+                                ui.set_min_width(ui.available_width() - 15.0); // Leave room for scrollbar
                                 match self.current_tab {
                                     Tab::Live => self.show_live_tab(ui),
                                     Tab::Movies => self.show_movies_tab(ui),
@@ -3056,7 +3057,7 @@ impl IPTVApp {
         let adjusted_now = self.get_adjusted_now();
         
         // Fixed layout for scrollable grid
-        let channel_col_width = 100.0;
+        let channel_col_width = 125.0;  // Wider channel column for longer names
         let prog_col_width = 130.0;
         let num_progs = 7; // Show 7 programs (current + 6 upcoming), user scrolls to see more
         
@@ -3129,14 +3130,26 @@ impl IPTVApp {
                     ui.horizontal(|ui| {
                         // Channel name (clickable) - fixed width
                         let name_text = Self::sanitize_text(channel_name);
-                        let short_name: String = name_text.chars().take(10).collect();
+                        let short_name: String = name_text.chars().take(14).collect();
                         
-                        ui.add_sized([channel_col_width - 10.0, 20.0], egui::SelectableLabel::new(
+                        let response = ui.add_sized([channel_col_width - 5.0, 20.0], egui::SelectableLabel::new(
                             is_selected, 
                             egui::RichText::new(&short_name).strong()
-                        )).clicked().then(|| {
+                        ));
+                        
+                        if response.clicked() {
                             self.selected_epg_channel = Some(channel_name.clone());
-                        });
+                        }
+                        
+                        if response.double_clicked() {
+                            // Find and play the channel
+                            if let Some(ch) = self.current_channels.iter().find(|c| c.name == *channel_name) {
+                                let channel = ch.clone();
+                                self.play_channel(&channel);
+                            }
+                        }
+                        
+                        response.on_hover_text(channel_name);
                         
                         // Program blocks - fixed width each
                         if let Some(ref id) = epg_id {
