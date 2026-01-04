@@ -3103,11 +3103,26 @@ impl IPTVApp {
                 
                 // Channel rows
                 for (channel_name, epg_id_opt) in &channels_to_show {
-                    let epg_id = epg_id_opt.clone().or_else(|| {
-                        self.current_channels.iter()
-                            .find(|c| c.name == *channel_name)
-                            .and_then(|c| c.epg_channel_id.clone())
-                    });
+                    // Try to find EPG ID - first from provided, then from current_channels, then from EPG data
+                    let epg_id = epg_id_opt.clone()
+                        .or_else(|| {
+                            self.current_channels.iter()
+                                .find(|c| c.name == *channel_name)
+                                .and_then(|c| c.epg_channel_id.clone())
+                        })
+                        .or_else(|| {
+                            // Search EPG data for matching channel name
+                            if let Some(ref epg) = self.epg_data {
+                                epg.channels.iter()
+                                    .find(|(_id, ch)| {
+                                        ch.name.to_lowercase().contains(&channel_name.to_lowercase()) ||
+                                        channel_name.to_lowercase().contains(&ch.name.to_lowercase())
+                                    })
+                                    .map(|(id, _)| id.clone())
+                            } else {
+                                None
+                            }
+                        });
                     
                     let is_selected = self.selected_epg_channel.as_ref() == Some(channel_name);
                     
