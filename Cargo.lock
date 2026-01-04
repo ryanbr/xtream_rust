@@ -4018,6 +4018,7 @@ dependencies = [
  "eframe",
  "egui",
  "ffmpeg-next",
+ "flate2",
  "mimalloc",
  "quick-xml",
  "rfd",

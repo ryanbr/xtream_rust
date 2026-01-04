@@ -1,10 +1,12 @@
 //! EPG (Electronic Program Guide) Parser
 //! Fast streaming parser for XMLTV format - handles 100MB+ files efficiently
+//! Supports both plain XML and gzip-compressed (.xml.gz) files
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::collections::HashMap;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
+use flate2::read::GzDecoder;
 
 /// A single TV program/show
 #[derive(Debug, Clone)]
@@ -346,11 +348,31 @@ impl EpgParser {
     }
 
     /// Parse EPG from file path - streams from disk
+    /// Parse EPG from file - auto-detects gzip compression
     pub fn parse_file(path: &str) -> Result<EpgData, String> {
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        let reader = std::io::BufReader::with_capacity(64 * 1024, file);
-        let sanitizing_reader = SanitizingBufReader::new(reader);
-        Self::parse_reader(sanitizing_reader)
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+        
+        // Read first 2 bytes to check for gzip magic number (1f 8b)
+        let mut magic = [0u8; 2];
+        reader.read_exact(&mut magic).map_err(|e| e.to_string())?;
+        
+        // Seek back to start
+        use std::io::Seek;
+        reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        
+        // Check for gzip magic bytes
+        if magic[0] == 0x1f && magic[1] == 0x8b {
+            // Gzip compressed - decompress first
+            let decoder = GzDecoder::new(reader);
+            let buf_reader = std::io::BufReader::with_capacity(64 * 1024, decoder);
+            let sanitizing_reader = SanitizingBufReader::new(buf_reader);
+            Self::parse_reader(sanitizing_reader)
+        } else {
+            // Plain XML
+            let sanitizing_reader = SanitizingBufReader::new(reader);
+            Self::parse_reader(sanitizing_reader)
+        }
     }
 }
 
@@ -884,14 +906,15 @@ impl EpgDownloader {
         config: &DownloadConfig,
         progress: Option<ProgressCallback>,
     ) -> Result<EpgData, String> {
-        // Create temp file
-        let temp_path = std::env::temp_dir().join("xtreme_iptv_epg.xml");
+        // Create temp file - use appropriate extension based on URL
+        let ext = if url.ends_with(".gz") { "xml.gz" } else { "xml" };
+        let temp_path = std::env::temp_dir().join(format!("xtreme_iptv_epg.{}", ext));
         let temp_path_str = temp_path.to_string_lossy().to_string();
 
         // Download with retry
         Self::download_to_file(url, &temp_path_str, config, progress)?;
 
-        // Parse the downloaded file
+        // Parse the downloaded file (auto-detects gzip)
         let result = EpgParser::parse_file(&temp_path_str);
 
         // Clean up temp file
