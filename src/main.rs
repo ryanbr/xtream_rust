@@ -299,8 +299,8 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
     viewport: egui::ViewportBuilder::default()
-        .with_inner_size([1150.0, 700.0])
-        .with_min_inner_size([900.0, 550.0])
+        .with_inner_size([1250.0, 700.0])
+        .with_min_inner_size([1000.0, 550.0])
         .with_icon(icon),
     vsync: true,
     hardware_acceleration: eframe::HardwareAcceleration::Preferred,
@@ -470,6 +470,7 @@ struct IPTVApp {
     epg_auto_update: EpgAutoUpdate,
     epg_last_update: Option<i64>,
     epg_startup_loaded: bool,
+    epg_last_ui_refresh: i64,
     selected_epg_channel: Option<String>,
 }
 
@@ -581,6 +582,7 @@ impl IPTVApp {
             epg_auto_update: EpgAutoUpdate::from_index(epg_auto_update_index),
             epg_last_update: None,
             epg_startup_loaded: false,
+            epg_last_ui_refresh: 0,
             selected_epg_channel: None,
         }
     }
@@ -1751,6 +1753,19 @@ impl eframe::App for IPTVApp {
         // Request repaint while loading or when player might be outputting
         if self.loading || self.epg_loading || self.current_player.is_some() {
             ctx.request_repaint();
+        }
+        
+        // EPG UI refresh every 5 minutes (to update current program, time remaining, etc.)
+        if self.epg_data.is_some() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            
+            if now - self.epg_last_ui_refresh >= 300 { // 5 minutes = 300 seconds
+                self.epg_last_ui_refresh = now;
+                ctx.request_repaint();
+            }
         }
         
         // Auto-login on startup if enabled
