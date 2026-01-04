@@ -1218,31 +1218,19 @@ impl IPTVApp {
         self.log(&format!("[PLAY] Buffer: {}s | Connection: {:?} | HW Accel: {}", buffer_secs, self.connection_quality, if self.hw_accel { "On" } else { "Off" }));
         
         if player_lower.contains("ffplay") {
-            // FFplay buffer settings - aggressive for IPTV
+            // FFplay settings - simplified for compatibility
+            // Note: ffplay takes input directly, not with -i flag
             let mut args = vec![
-                "-i".to_string(), channel.url.clone(),
+                channel.url.clone(),  // Input URL first
                 "-autoexit".to_string(),
                 
-                // === BUFFERING (most important) ===
+                // === BUFFERING ===
                 "-probesize".to_string(), format!("{}", buffer_bytes_large),
-                "-analyzeduration".to_string(), format!("{}", buffer_ms * 2000), // microseconds, 2x buffer
-                
-                // === STREAM FLAGS ===
-                "-fflags".to_string(), "+genpts+discardcorrupt+igndts+nobuffer".to_string(),
-                "-flags".to_string(), "low_delay".to_string(),
-                
-                // === BUFFER SIZES ===
-                "-rtbufsize".to_string(), format!("{}M", buffer_secs * 4),
-                "-max_delay".to_string(), format!("{}", buffer_ms * 1000),
-                "-reorder_queue_size".to_string(), format!("{}", buffer_secs * 100),
+                "-analyzeduration".to_string(), format!("{}", buffer_ms * 2000), // microseconds
                 
                 // === SYNC OPTIONS ===
                 "-sync".to_string(), "audio".to_string(),
                 "-framedrop".to_string(),
-                "-avioflags".to_string(), "direct".to_string(),
-                
-                // === THREADS ===
-                "-threads".to_string(), "0".to_string(), // Auto
             ];
             
             // Window title with stream filename
@@ -1255,22 +1243,13 @@ impl IPTVApp {
                 args.extend([
                     "-reconnect".to_string(), "1".to_string(),
                     "-reconnect_streamed".to_string(), "1".to_string(),
-                    "-reconnect_at_eof".to_string(), "1".to_string(),
                     "-reconnect_delay_max".to_string(), if is_slow { "30".to_string() } else { "10".to_string() },
-                    // Timeout settings
-                    "-timeout".to_string(), format!("{}", buffer_ms * 2000), // microseconds
-                    "-rw_timeout".to_string(), format!("{}", buffer_ms * 2000),
                 ]);
             }
             
-            // Slow connection optimizations
+            // Infinite buffer for slow connections
             if is_slow {
-                args.extend([
-                    "-infbuf".to_string(),  // Infinite buffer mode
-                    "-fflags".to_string(), "+genpts+discardcorrupt+igndts".to_string(),
-                    "-err_detect".to_string(), "ignore_err".to_string(),
-                    "-ec".to_string(), "favor_inter".to_string(), // Error concealment
-                ]);
+                args.push("-infbuf".to_string());
             }
             
             // User agent (optional)
@@ -1280,11 +1259,9 @@ impl IPTVApp {
                 ]);
             }
             
-            // Hardware acceleration
-            if self.hw_accel {
-                args.insert(0, "auto".to_string());
-                args.insert(0, "-hwaccel".to_string());
-            }
+            // Note: Hardware acceleration disabled for ffplay - causes black screen
+            // on many Windows setups due to Vulkan renderer incompatibility.
+            // Software decoding is fast enough for most streams.
             
             for arg in args {
                 cmd.arg(arg);
