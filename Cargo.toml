@@ -16,7 +16,8 @@ egui = { version = "0.33", default-features = false, features = ["default_fonts"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "6.0"
-rfd = "0.17"
+# issue with rfd 0.17 on certain platforms (aarch64 Linux). The issue is in the xdg-portal/libdbus backend where c_char differs between platforms (i8 on x86, u8 on ARM).
+rfd = "0.15"
 chrono = "0.4"
 flate2 = "1.1"
 ureq = "3.1"
