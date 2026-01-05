@@ -348,17 +348,16 @@ fn extract_attrs_fast<'a>(info: &'a str, attrs: &mut AttrBuffer<'a>) {
 /// Extract credentials from M3U Plus URL
 /// Format: http://server/get.php?username=XXX&password=YYY&type=m3u_plus
 pub fn extract_credentials(url: &str) -> Option<M3uCredentials> {
-    // Try query parameters first
-    if let Some(creds) = extract_from_query(url) {
-        return Some(creds);
-    }
+    extract_from_query(url).or_else(|| extract_from_path(url))
+}
 
-    // Try path-based credentials
-    if let Some(creds) = extract_from_path(url) {
-        return Some(creds);
-    }
-
-    None
+/// Extract server base URL and path from a URL
+/// Returns (server, path) e.g. ("http://example.com:8080", "/live/user/pass/1.ts")
+fn parse_url_parts(url: &str) -> Option<(&str, &str)> {
+    let proto_end = url.find("://")?;
+    let rest = &url[proto_end + 3..];
+    let path_start = rest.find('/').unwrap_or(rest.len());
+    Some((&url[..proto_end + 3 + path_start], &rest[path_start..]))
 }
 
 fn extract_from_query(url: &str) -> Option<M3uCredentials> {
@@ -378,42 +377,31 @@ fn extract_from_query(url: &str) -> Option<M3uCredentials> {
         }
     }
     
-    let username = username?;
-    let password = password?;
-
-    // Extract server (up to the path)
-    let proto_end = url.find("://")?;
-    let rest = &url[proto_end + 3..];
-    let server = if let Some(path_start) = rest.find('/') {
-        url[..proto_end + 3 + path_start].to_string()
-    } else {
-        url.to_string()
-    };
+    let (server, _) = parse_url_parts(url)?;
 
     Some(M3uCredentials {
-        server,
-        username: username.to_string(),
-        password: password.to_string(),
+        server: server.to_string(),
+        username: username?.to_string(),
+        password: password?.to_string(),
     })
 }
 
 fn extract_from_path(url: &str) -> Option<M3uCredentials> {
-    // Pattern: http://server/live/username/password/channel.ts
-    let proto_end = url.find("://")?;
-    let rest = &url[proto_end + 3..];
+    let (server, path) = parse_url_parts(url)?;
     
-    let path_start = rest.find('/')?;
-    let server = url[..proto_end + 3 + path_start].to_string();
+    // Need a path with segments
+    if path.is_empty() || path == "/" {
+        return None;
+    }
     
-    let path = &rest[path_start + 1..];
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let segments: Vec<&str> = path[1..].split('/').filter(|s| !s.is_empty()).collect();
 
     // Pattern: live/username/password/...
     if segments.len() >= 3 {
         let prefixes = ["live", "movie", "series"];
         if prefixes.contains(&segments[0].to_lowercase().as_str()) {
             return Some(M3uCredentials {
-                server,
+                server: server.to_string(),
                 username: segments[1].to_string(),
                 password: segments[2].to_string(),
             });
@@ -428,7 +416,7 @@ fn extract_from_path(url: &str) -> Option<M3uCredentials> {
         if !first.contains('.') && !second.contains('.') 
             && first.len() > 1 && second.len() > 1 {
             return Some(M3uCredentials {
-                server,
+                server: server.to_string(),
                 username: first.to_string(),
                 password: second.to_string(),
             });
