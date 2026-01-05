@@ -20,6 +20,7 @@ mod api;
 mod config;
 mod models;
 mod m3u_parser;
+mod xspf_parser;
 mod epg;
 mod ffmpeg_player;
 
@@ -175,6 +176,10 @@ enum TaskResult {
     SeriesListLoaded(Vec<SeriesInfo>),
     SeasonsLoaded(Vec<i32>),
     EpisodesLoaded(Vec<Episode>),
+    PlaylistLoaded {
+        channels: Vec<Channel>,
+        playlist_name: Option<String>,
+    },
     Error(String),
     PlayerLog(String),
     PlayerExited { code: Option<i32>, stderr: String },
@@ -407,6 +412,12 @@ struct IPTVApp {
     show_m3u_dialog: bool,
     m3u_url_input: String,
     
+    // Playlist loading (M3U/M3U8/XSPF)
+    show_playlist_dialog: bool,
+    playlist_url_input: String,
+    playlist_mode: bool,
+    playlist_sources: Vec<(usize, String)>, // (start_index, source_name) for separators
+    
     // Console log
     console_log: Vec<String>,
     
@@ -532,6 +543,10 @@ impl IPTVApp {
             show_reset_confirm: false,
             show_m3u_dialog: false,
             m3u_url_input: String::new(),
+            show_playlist_dialog: false,
+            playlist_url_input: String::new(),
+            playlist_mode: false,
+            playlist_sources: Vec::new(),
             console_log: vec!["[INFO] Xtreme IPTV Player started".to_string()],
             single_window_mode,
             current_player: None,
@@ -687,6 +702,8 @@ impl IPTVApp {
         self.current_episodes.clear();
         self.navigation_stack.clear();
         self.scroll_positions.clear();
+        self.playlist_sources.clear();
+        self.playlist_mode = false;
         self.logged_in = false;
         
         // Reset config and save
@@ -1711,6 +1728,83 @@ impl IPTVApp {
             }
         }
     }
+
+    fn load_playlist(&mut self, url: &str) {
+        let url = url.to_string();
+        let sender = self.task_sender.clone();
+        let user_agent = self.get_user_agent().to_string();
+        
+        self.loading = true;
+        self.status_message = "Loading playlist...".to_string();
+        self.log(&format!("[INFO] Loading playlist: {}", url));
+        
+        std::thread::spawn(move || {
+            let agent = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(60)))
+                .build()
+                .new_agent();
+            
+            let result = agent.get(&url)
+                .header("User-Agent", &user_agent)
+                .call();
+            
+            match result {
+                Ok(mut response) => {
+                    if let Ok(content) = response.body_mut().read_to_string() {
+                        let (channels, playlist_name) = if xspf_parser::is_xspf(&content) {
+                            // Parse as XSPF
+                            match xspf_parser::parse_xspf(&content) {
+                                Ok(playlist) => {
+                                    let name = playlist.title.clone();
+                                    let m3u_channels = xspf_parser::to_m3u_channels(&playlist);
+                                    let channels: Vec<Channel> = m3u_channels.into_iter().map(|c| {
+                                        Channel {
+                                            stream_id: None,
+                                            name: c.name,
+                                            url: c.url,
+                                            epg_channel_id: c.tvg_id,
+                                            stream_icon: c.tvg_logo,
+                                            category_id: None,
+                                            series_id: None,
+                                            container_extension: None,
+                                        }
+                                    }).collect();
+                                    (channels, name)
+                                }
+                                Err(e) => {
+                                    let _ = sender.send(TaskResult::Error(format!("XSPF parse error: {}", e)));
+                                    return;
+                                }
+                            }
+                        } else {
+                            // Parse as M3U/M3U8
+                            let playlist = m3u_parser::parse_m3u_playlist(&content);
+                            let channels: Vec<Channel> = playlist.channels.into_iter().map(|c| {
+                                Channel {
+                                    stream_id: None,
+                                    name: c.name,
+                                    url: c.url,
+                                    epg_channel_id: c.tvg_id,
+                                    stream_icon: c.tvg_logo,
+                                    category_id: None,
+                                    series_id: None,
+                                    container_extension: None,
+                                }
+                            }).collect();
+                            (channels, None)
+                        };
+                        
+                        let _ = sender.send(TaskResult::PlaylistLoaded { channels, playlist_name });
+                    } else {
+                        let _ = sender.send(TaskResult::Error("Failed to read playlist content".to_string()));
+                    }
+                }
+                Err(e) => {
+                    let _ = sender.send(TaskResult::Error(format!("Failed to fetch playlist: {}", e)));
+                }
+            }
+        });
+    }
 }
 
 impl eframe::App for IPTVApp {
@@ -1827,6 +1921,35 @@ impl eframe::App for IPTVApp {
                     self.epg_progress = 0.0;
                     self.epg_status = format!("Error: {}", msg);
                 }
+                TaskResult::PlaylistLoaded { channels, playlist_name } => {
+                    let count = channels.len();
+                    let source_name = playlist_name.clone().unwrap_or_else(|| "Playlist".to_string());
+                    self.log(&format!("[INFO] Loaded {} with {} channels", source_name, count));
+                    
+                    // Track source for separator display
+                    let start_idx = self.current_channels.len();
+                    self.playlist_sources.push((start_idx, source_name.clone()));
+                    
+                    // Append channels (don't replace)
+                    self.current_channels.extend(channels);
+                    
+                    self.playlist_mode = true;
+                    self.logged_in = true;
+                    self.loading = false;
+                    
+                    // Set navigation to show channels (only on first playlist load)
+                    if self.playlist_sources.len() == 1 {
+                        self.navigation_stack.clear();
+                        self.navigation_stack.push(NavigationLevel::Channels("Playlist".to_string()));
+                    }
+                    
+                    let total = self.current_channels.len();
+                    if self.playlist_sources.len() > 1 {
+                        self.status_message = format!("Total: {} channels from {} playlists", total, self.playlist_sources.len());
+                    } else {
+                        self.status_message = format!("Loaded: {} ({} channels)", source_name, count);
+                    }
+                }
             }
         }
         
@@ -1923,15 +2046,15 @@ impl eframe::App for IPTVApp {
                     self.show_address_book = true;
                 }
                 
-                if ui.button("📋 M3U URL").clicked() {
-                    self.show_m3u_dialog = true;
+                if ui.button("📺 Load Playlist").on_hover_text("Load M3U/M3U8/XSPF playlist URL").clicked() {
+                    self.show_playlist_dialog = true;
                 }
                 
                 if ui.button("🌐 User Agent").clicked() {
                     self.show_user_agent_dialog = true;
                 }
                 
-                if ui.button("📺 EPG").on_hover_text("Load Electronic Program Guide").clicked() {
+                if ui.button("📡 EPG").on_hover_text("Load Electronic Program Guide").clicked() {
                     self.show_epg_dialog = true;
                 }
                 
@@ -2407,26 +2530,60 @@ impl eframe::App for IPTVApp {
                 });
         }
 
-        // M3U URL Dialog
-        if self.show_m3u_dialog {
-            egui::Window::new("M3U Plus URL")
+        // Playlist URL Dialog (M3U/M3U8/XSPF)
+        if self.show_playlist_dialog {
+            egui::Window::new("📺 Load Playlist")
                 .collapsible(false)
                 .show(ctx, |ui| {
-                    ui.label("Enter M3U Plus URL:");
-                    ui.add(egui::TextEdit::singleline(&mut self.m3u_url_input)
-                        .hint_text("http://server/get.php?username=...&password=...&type=m3u_plus")
-                        .desired_width(400.0));
+                    ui.label("Enter playlist URL:");
+                    ui.add(egui::TextEdit::singleline(&mut self.playlist_url_input)
+                        .hint_text("http://example.com/playlist.m3u8 or Xtream M3U URL")
+                        .desired_width(500.0));
+                    
+                    ui.add_space(8.0);
                     
                     ui.horizontal(|ui| {
-                        if ui.button("Extract & Login").clicked() {
-                            self.extract_m3u_credentials(&self.m3u_url_input.clone());
-                            self.show_m3u_dialog = false;
-                            self.login();
+                        if ui.button("▶ Load Playlist").on_hover_text("Load as M3U/M3U8/XSPF playlist (appends to existing)").clicked() {
+                            if !self.playlist_url_input.is_empty() {
+                                let url = self.playlist_url_input.clone();
+                                self.load_playlist(&url);
+                            }
+                            self.show_playlist_dialog = false;
                         }
+                        
+                        if ui.button("🔑 Extract & Login").on_hover_text("Extract Xtream credentials from M3U Plus URL").clicked() {
+                            if !self.playlist_url_input.is_empty() {
+                                self.extract_m3u_credentials(&self.playlist_url_input.clone());
+                                self.show_playlist_dialog = false;
+                                self.login();
+                            }
+                        }
+                        
                         if ui.button("Cancel").clicked() {
-                            self.show_m3u_dialog = false;
+                            self.show_playlist_dialog = false;
                         }
                     });
+                    
+                    // Show current playlist status and clear button
+                    if !self.playlist_sources.is_empty() {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Loaded: {} playlist(s), {} channels", 
+                                self.playlist_sources.len(), 
+                                self.current_channels.len()));
+                            if ui.button("🗑 Clear All").on_hover_text("Remove all loaded playlists").clicked() {
+                                self.current_channels.clear();
+                                self.playlist_sources.clear();
+                                self.playlist_mode = false;
+                                self.status_message = "Playlists cleared".to_string();
+                            }
+                        });
+                    }
+                    
+                    ui.separator();
+                    ui.label("▶ Load Playlist: M3U, M3U8/HLS, XSPF files (can load multiple)");
+                    ui.label("🔑 Extract & Login: Xtream M3U Plus URLs with username/password");
                 });
         }
 
@@ -2709,10 +2866,29 @@ impl IPTVApp {
             
             // Clone channels to avoid borrow issues
             let channels: Vec<_> = self.current_channels.clone();
+            let playlist_sources = self.playlist_sources.clone();
             let mut toggle_fav: Option<FavoriteItem> = None;
             let mut to_play: Option<Channel> = None;
             
-            for channel in &channels {
+            for (idx, channel) in channels.iter().enumerate() {
+                // Show separator header for playlist sources (only in playlist mode)
+                if self.playlist_mode && !playlist_sources.is_empty() {
+                    for (start_idx, source_name) in &playlist_sources {
+                        if *start_idx == idx {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("📺 {}", source_name))
+                                    .strong()
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(100, 149, 237)));
+                            });
+                            ui.separator();
+                            ui.add_space(4.0);
+                        }
+                    }
+                }
+                
                 let display_name = Self::sanitize_text(&channel.name);
                 if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
                     continue;
@@ -3057,10 +3233,8 @@ impl IPTVApp {
                 
                 ui.label(Self::sanitize_text(&item.name));
                 
-                // Show EPG info for live streams
-                if item.stream_type == "live" {
-                    self.show_epg_inline(ui, &item.name, None);
-                }
+                // Show EPG info (will only display if EPG match found)
+                self.show_epg_inline(ui, &item.name, None);
                 
                 ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&item.category_name))).weak());
                 
