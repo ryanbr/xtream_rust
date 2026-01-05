@@ -11,12 +11,12 @@ default = []
 internal-player = ["ffmpeg-next"]
 
 [dependencies]
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
-egui = { version = "0.29", default-features = false, features = ["default_fonts"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+egui = { version = "0.33", default-features = false, features = ["default_fonts"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-dirs = "5.0"
-rfd = "0.15"
+dirs = "6.0"
+rfd = "0.17"
 chrono = "0.4"
 flate2 = "1.1"
 ureq = "3.1"
@@ -25,13 +25,13 @@ quick-xml = "0.38.4"
 
 # Platform-specific features
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
 
 # Fast memory allocator (Linux, macOS - not Windows MSVC)
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

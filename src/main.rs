@@ -2104,7 +2104,7 @@ impl eframe::App for IPTVApp {
                     .default_width(300.0)
                     .min_width(200.0)
                     .max_width(450.0)
-                    .frame(egui::Frame::none())
+                    .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| {
                         // Restore scroll position if pending
                         let scroll_offset = self.pending_scroll_restore.take();
@@ -3276,10 +3276,10 @@ impl IPTVApp {
                         let name_text = Self::sanitize_text(channel_name);
                         let short_name: String = name_text.chars().take(14).collect();
                         
-                        let response = ui.add_sized([channel_col_width - 5.0, 20.0], egui::SelectableLabel::new(
-                            is_selected, 
-                            egui::RichText::new(&short_name).strong()
-                        ));
+                        let response = ui.add_sized([channel_col_width - 5.0, 20.0], 
+                            egui::Button::new(egui::RichText::new(&short_name).strong())
+                                .selected(is_selected)
+                        );
                         
                         if response.clicked() {
                             self.selected_epg_channel = Some(channel_name.clone());
@@ -3362,10 +3362,10 @@ impl IPTVApp {
                                     egui::Color32::LIGHT_GRAY
                                 };
                                 
-                                egui::Frame::none()
+                                egui::Frame::new()
                                     .fill(bg_color)
-                                    .inner_margin(egui::Margin::symmetric(4.0, 3.0))
-                                    .rounding(3.0)
+                                    .inner_margin(egui::Margin::symmetric(4, 3))
+                                    .corner_radius(3.0)
                                     .show(ui, |ui| {
                                         ui.set_min_width(width);
                                         ui.set_max_width(width);
