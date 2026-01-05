@@ -2,7 +2,6 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -366,26 +365,29 @@ fn extract_from_query(url: &str) -> Option<M3uCredentials> {
     let query_start = url.find('?')?;
     let query = &url[query_start + 1..];
     
-    let mut params: HashMap<&str, &str> = HashMap::new();
+    let mut username = None;
+    let mut password = None;
+    
     for pair in query.split('&') {
         if let Some((key, value)) = pair.split_once('=') {
-            params.insert(key, value);
+            match key {
+                "username" | "user" => username = Some(value),
+                "password" | "pass" => password = Some(value),
+                _ => {}
+            }
         }
     }
-
-    let username = params.get("username").or(params.get("user"))?;
-    let password = params.get("password").or(params.get("pass"))?;
+    
+    let username = username?;
+    let password = password?;
 
     // Extract server (up to the path)
-    let server = if let Some(proto_end) = url.find("://") {
-        let rest = &url[proto_end + 3..];
-        if let Some(path_start) = rest.find('/') {
-            url[..proto_end + 3 + path_start].to_string()
-        } else {
-            url.to_string()
-        }
+    let proto_end = url.find("://")?;
+    let rest = &url[proto_end + 3..];
+    let server = if let Some(path_start) = rest.find('/') {
+        url[..proto_end + 3 + path_start].to_string()
     } else {
-        return None;
+        url.to_string()
     };
 
     Some(M3uCredentials {
