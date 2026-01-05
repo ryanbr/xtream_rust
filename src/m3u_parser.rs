@@ -13,6 +13,7 @@ pub struct M3uChannel {
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
     pub tvg_name: Option<String>,      // Alternate name for EPG matching
+    pub tvg_chno: Option<u32>,          // Channel number
     pub catchup: Option<String>,        // Catchup type (default, shift, etc.)
     pub catchup_days: Option<u32>,      // Days of catchup available
 }
@@ -104,7 +105,11 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
     for line in content.lines() {
         let line = line.trim();
         
-        if let Some(info_part) = line.strip_prefix("#EXTINF:") {
+        // Handle both #EXTINF: and EXTINF: (some malformed M3Us miss the #)
+        let info_part = line.strip_prefix("#EXTINF:")
+            .or_else(|| line.strip_prefix("EXTINF:"));
+        
+        if let Some(info_part) = info_part {
             current_attrs.clear();
             extract_attrs_fast(info_part, &mut current_attrs);
             
@@ -112,8 +117,8 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
             if let Some(comma_pos) = info_part.rfind(',') {
                 current_name = Some(info_part[comma_pos + 1..].trim());
             }
-        } else if !line.is_empty() && !line.starts_with('#') {
-            // This is a URL line
+        } else if !line.is_empty() && !line.starts_with('#') && !line.starts_with("EXTM3U") {
+            // This is a URL line (skip EXTM3U without #)
             if let Some(name) = current_name.take() {
                 channels.push(M3uChannel {
                     name: name.to_string(),
@@ -122,6 +127,8 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
                     tvg_id: current_attrs.get("tvg-id").map(|s| s.to_string()),
                     tvg_logo: current_attrs.get("tvg-logo").map(|s| s.to_string()),
                     tvg_name: current_attrs.get("tvg-name").map(|s| s.to_string()),
+                    tvg_chno: current_attrs.get("tvg-chno")
+                        .and_then(|s| s.parse().ok()),
                     catchup: current_attrs.get("catchup").map(|s| s.to_string()),
                     catchup_days: current_attrs.get("catchup-days")
                         .and_then(|s| s.parse().ok()),
@@ -182,8 +189,8 @@ fn extract_attrs_fast<'a>(info: &'a str, attrs: &mut AttrBuffer<'a>) {
     }
     
     while i < len {
-        // Skip whitespace
-        while i < len && bytes[i].is_ascii_whitespace() {
+        // Skip whitespace and stray quotes
+        while i < len && (bytes[i].is_ascii_whitespace() || bytes[i] == b'"') {
             i += 1;
         }
         
@@ -194,11 +201,17 @@ fn extract_attrs_fast<'a>(info: &'a str, attrs: &mut AttrBuffer<'a>) {
         
         // Find key (until '=')
         let key_start = i;
-        while i < len && bytes[i] != b'=' && bytes[i] != b',' {
+        while i < len && bytes[i] != b'=' && bytes[i] != b',' && bytes[i] != b'"' {
             i += 1;
         }
         
         if i >= len || bytes[i] == b',' { break; }
+        
+        // Skip if we hit a quote before '=' (malformed)
+        if bytes[i] == b'"' {
+            i += 1;
+            continue;
+        }
         
         let key = &info[key_start..i];
         i += 1; // skip '='
@@ -386,5 +399,40 @@ http://example.com/stream.ts
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].tvg_id, Some("unquoted".to_string()));
         assert_eq!(channels[0].group, Some("Quoted Group".to_string()));
+    }
+
+    #[test]
+    fn test_parse_malformed_stray_quotes() {
+        // Real-world format with stray quote before tvg-name
+        let content = r#"#EXTM3U
+#EXTINF:0 tvg-logo="https://example.com/logo.png" "tvg-name="SRF1.ch" tvg-chno="1108" group-title="Deutsch", SRF 1 FHD
+udp://@233.50.230.1:5000
+"#;
+        let channels = parse_m3u(content);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].name, "SRF 1 FHD");
+        assert_eq!(channels[0].tvg_logo, Some("https://example.com/logo.png".to_string()));
+        assert_eq!(channels[0].tvg_name, Some("SRF1.ch".to_string()));
+        assert_eq!(channels[0].tvg_chno, Some(1108));
+        assert_eq!(channels[0].group, Some("Deutsch".to_string()));
+        assert_eq!(channels[0].url, "udp://@233.50.230.1:5000");
+    }
+
+    #[test]
+    fn test_parse_extinf_without_hash() {
+        // Some malformed M3Us have EXTINF without # prefix
+        let content = r#"#EXTM3U
+#EXTINF:-1 tvg-id="" tvg-name="Channel 1" group-title="Group",Channel 1
+http://example.com/1.mp4
+EXTINF:-1 tvg-id="" tvg-name="Channel 2" group-title="Group",Channel 2
+http://example.com/2.mp4
+#EXTINF:-1 tvg-id="" tvg-name="Channel 3" group-title="Group",Channel 3
+http://example.com/3.mp4
+"#;
+        let channels = parse_m3u(content);
+        assert_eq!(channels.len(), 3);
+        assert_eq!(channels[0].name, "Channel 1");
+        assert_eq!(channels[1].name, "Channel 2");
+        assert_eq!(channels[2].name, "Channel 3");
     }
 }
