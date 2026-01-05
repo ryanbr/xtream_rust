@@ -31,6 +31,16 @@ use epg::{EpgData, EpgAutoUpdate, EpgDownloader, DownloadConfig, Program};
 
 // Re-export ConnectionQuality for use in main
 
+/// Case-insensitive substring check without allocation
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() { return true; }
+    if needle.len() > haystack.len() { return false; }
+    
+    haystack.as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Get current time as HH:MM:SS (UTC)
 fn timestamp_now() -> String {
     let now = std::time::SystemTime::now()
@@ -3245,14 +3255,13 @@ impl IPTVApp {
                                 .and_then(|c| c.epg_channel_id.clone())
                         })
                         .or_else(|| {
-                            // Search EPG data for matching channel name
+                            // Search EPG data for matching channel name (case-insensitive)
                             if let Some(ref epg) = self.epg_data {
-                                let channel_name_lower = channel_name.to_lowercase();
                                 epg.channels.iter()
                                     .find(|(_id, ch)| {
-                                        let ch_name_lower = ch.name.to_lowercase();
-                                        ch_name_lower.contains(&channel_name_lower) ||
-                                        channel_name_lower.contains(&ch_name_lower)
+                                        // Use case-insensitive contains without allocation
+                                        contains_ignore_case(&ch.name, channel_name) ||
+                                        contains_ignore_case(channel_name, &ch.name)
                                     })
                                     .map(|(id, _)| id.clone())
                             } else {
