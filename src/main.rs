@@ -1121,38 +1121,32 @@ impl IPTVApp {
     
     fn get_current_program(&self, epg_channel_id: &str) -> Option<&Program> {
         let epg = self.epg_data.as_ref()?;
-        let offset_secs = (self.epg_time_offset * 3600.0) as i64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let adjusted_now = now - offset_secs;
+        let adjusted_now = self.get_adjusted_now();
         
-        epg.programs
-            .get(epg_channel_id)?
-            .iter()
-            .find(|p| p.start <= adjusted_now && p.stop > adjusted_now)
+        let programs = epg.programs.get(epg_channel_id)?;
+        
+        // Binary search for the first program that ends after now
+        // Programs are sorted by start time
+        let idx = programs.partition_point(|p| p.stop <= adjusted_now);
+        
+        // Check if this program has started
+        programs.get(idx).filter(|p| p.start <= adjusted_now)
     }
     
     /// Get current and next N programs for a channel (with time offset applied)
     fn get_upcoming_programs(&self, epg_channel_id: &str, count: usize) -> Vec<&Program> {
         let Some(epg) = self.epg_data.as_ref() else { return Vec::new() };
-        let offset_secs = (self.epg_time_offset * 3600.0) as i64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let adjusted_now = now - offset_secs;
+        let adjusted_now = self.get_adjusted_now();
         
-        epg.programs
-            .get(epg_channel_id)
-            .map(|progs| {
-                progs.iter()
-                    .filter(|p| p.stop > adjusted_now)
-                    .take(count)
-                    .collect()
-            })
-            .unwrap_or_default()
+        let Some(programs) = epg.programs.get(epg_channel_id) else { 
+            return Vec::new() 
+        };
+        
+        // Binary search for the first program that ends after now
+        let start_idx = programs.partition_point(|p| p.stop <= adjusted_now);
+        
+        // Take up to 'count' programs from that point
+        programs[start_idx..].iter().take(count).collect()
     }
     
     /// Get adjusted "now" timestamp accounting for EPG time offset
