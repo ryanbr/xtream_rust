@@ -100,70 +100,83 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
     let estimated_channels = content.len() / 200;
     let mut channels = Vec::with_capacity(estimated_channels.max(100));
     
-    // Reuse buffers to avoid allocations
+    // Reuse buffer to avoid allocations
     let mut current_attrs = AttrBuffer::new();
     let mut current_name: Option<&str> = None;
     
     for line in content.lines() {
         let line = line.trim();
+        let bytes = line.as_bytes();
         
-        // Handle both #EXTINF: and EXTINF: (some malformed M3Us miss the #)
-        let info_part = line.strip_prefix("#EXTINF:")
-            .or_else(|| line.strip_prefix("EXTINF:"));
+        // Fast prefix check using bytes
+        let info_part = if bytes.starts_with(b"#EXTINF:") {
+            Some(&line[8..])
+        } else if bytes.starts_with(b"EXTINF:") {
+            Some(&line[7..])
+        } else {
+            None
+        };
         
         if let Some(info_part) = info_part {
             current_attrs.clear();
             
-            // Check format: standard has attrs before last comma, alternate has attrs after first comma
-            // Standard: "-1 tvg-id="x" group-title="y",Channel Name"
-            // Alternate: "10.000000,TVG-ID="x" tvg-name="y",Channel Name"
+            // Find first and last comma in single pass
+            let info_bytes = info_part.as_bytes();
+            let mut first_comma = None;
+            let mut last_comma = None;
+            let mut has_eq_before_comma = false;
             
-            // Find first comma (after duration)
-            if let Some(first_comma) = info_part.find(',') {
-                let before_first_comma = &info_part[..first_comma];
-                let after_first_comma = &info_part[first_comma + 1..];
-                
-                // Check if attributes are before or after the first comma
-                if before_first_comma.contains('=') {
+            for (i, &b) in info_bytes.iter().enumerate() {
+                if b == b',' {
+                    if first_comma.is_none() {
+                        first_comma = Some(i);
+                    }
+                    last_comma = Some(i);
+                } else if b == b'=' && first_comma.is_none() {
+                    has_eq_before_comma = true;
+                }
+            }
+            
+            if let Some(first) = first_comma {
+                if has_eq_before_comma {
                     // Standard format: attrs before comma
                     extract_attrs_fast(info_part, &mut current_attrs);
-                    // Name is after last comma
-                    if let Some(last_comma) = info_part.rfind(',') {
-                        current_name = Some(info_part[last_comma + 1..].trim());
+                    if let Some(last) = last_comma {
+                        current_name = Some(info_part[last + 1..].trim());
                     }
                 } else {
                     // Alternate format: duration,attrs,name
-                    extract_attrs_fast(after_first_comma, &mut current_attrs);
-                    // Name is after last comma
-                    if let Some(last_comma) = after_first_comma.rfind(',') {
-                        current_name = Some(after_first_comma[last_comma + 1..].trim());
+                    let after_first = &info_part[first + 1..];
+                    extract_attrs_fast(after_first, &mut current_attrs);
+                    // Find last comma in remaining part
+                    if let Some(pos) = after_first.rfind(',') {
+                        current_name = Some(after_first[pos + 1..].trim());
                     } else {
-                        // No second comma, entire after_first_comma is the name
-                        current_name = Some(after_first_comma.trim());
+                        current_name = Some(after_first.trim());
                     }
                 }
             } else {
-                // No comma at all - just try to extract attrs
                 extract_attrs_fast(info_part, &mut current_attrs);
             }
-        } else if !line.is_empty() && !line.starts_with('#') && !line.starts_with("EXTM3U") {
-            // This is a URL line (skip EXTM3U without #)
+        } else if !bytes.is_empty() && bytes[0] != b'#' && !bytes.starts_with(b"EXTM3U") {
+            // URL line
             if let Some(name) = current_name.take() {
+                // Extract all attrs in one pass using indices
+                let (group, tvg_id, tvg_logo, tvg_name, tvg_chno, channel_id, channel_number, catchup, catchup_days) = 
+                    current_attrs.get_all();
+                
                 channels.push(M3uChannel {
                     name: name.to_string(),
                     url: line.to_string(),
-                    group: current_attrs.get("group-title").map(|s| s.to_string()),
-                    tvg_id: current_attrs.get("tvg-id").map(|s| s.to_string()),
-                    tvg_logo: current_attrs.get("tvg-logo").map(|s| s.to_string()),
-                    tvg_name: current_attrs.get("tvg-name").map(|s| s.to_string()),
-                    tvg_chno: current_attrs.get("tvg-chno")
-                        .and_then(|s| s.parse().ok()),
-                    channel_id: current_attrs.get("channel-id").map(|s| s.to_string()),
-                    channel_number: current_attrs.get("channel-number")
-                        .and_then(|s| s.parse().ok()),
-                    catchup: current_attrs.get("catchup").map(|s| s.to_string()),
-                    catchup_days: current_attrs.get("catchup-days")
-                        .and_then(|s| s.parse().ok()),
+                    group: group.map(|s| s.to_string()),
+                    tvg_id: tvg_id.map(|s| s.to_string()),
+                    tvg_logo: tvg_logo.map(|s| s.to_string()),
+                    tvg_name: tvg_name.map(|s| s.to_string()),
+                    tvg_chno: tvg_chno.and_then(|s| s.parse().ok()),
+                    channel_id: channel_id.map(|s| s.to_string()),
+                    channel_number: channel_number.and_then(|s| s.parse().ok()),
+                    catchup: catchup.map(|s| s.to_string()),
+                    catchup_days: catchup_days.and_then(|s| s.parse().ok()),
                 });
             }
         }
@@ -174,14 +187,14 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
 
 /// Lightweight attribute buffer - avoids HashMap overhead
 struct AttrBuffer<'a> {
-    attrs: [Option<(&'a str, &'a str)>; 8], // Most M3Us have <8 attrs per line
+    attrs: [Option<(&'a str, &'a str)>; 12], // Increased for more attrs
     len: usize,
 }
 
 impl<'a> AttrBuffer<'a> {
     fn new() -> Self {
         Self {
-            attrs: [None; 8],
+            attrs: [None; 12],
             len: 0,
         }
     }
@@ -191,12 +204,14 @@ impl<'a> AttrBuffer<'a> {
     }
     
     fn push(&mut self, key: &'a str, value: &'a str) {
-        if self.len < 8 {
+        if self.len < 12 {
             self.attrs[self.len] = Some((key, value));
             self.len += 1;
         }
     }
     
+    /// Get a single attribute by key (case-insensitive)
+    #[allow(dead_code)]
     fn get(&self, key: &str) -> Option<&'a str> {
         for i in 0..self.len {
             if let Some((k, v)) = self.attrs[i] {
@@ -206,6 +221,56 @@ impl<'a> AttrBuffer<'a> {
             }
         }
         None
+    }
+    
+    /// Get all known attributes in single pass - avoids repeated linear searches
+    fn get_all(&self) -> (
+        Option<&'a str>, // group-title
+        Option<&'a str>, // tvg-id
+        Option<&'a str>, // tvg-logo
+        Option<&'a str>, // tvg-name
+        Option<&'a str>, // tvg-chno
+        Option<&'a str>, // channel-id
+        Option<&'a str>, // channel-number
+        Option<&'a str>, // catchup
+        Option<&'a str>, // catchup-days
+    ) {
+        let mut group = None;
+        let mut tvg_id = None;
+        let mut tvg_logo = None;
+        let mut tvg_name = None;
+        let mut tvg_chno = None;
+        let mut channel_id = None;
+        let mut channel_number = None;
+        let mut catchup = None;
+        let mut catchup_days = None;
+        
+        for i in 0..self.len {
+            if let Some((k, v)) = self.attrs[i] {
+                // Compare lowercase first char for fast rejection
+                let k_bytes = k.as_bytes();
+                if k_bytes.is_empty() { continue; }
+                
+                match k_bytes[0].to_ascii_lowercase() {
+                    b'g' => if k.eq_ignore_ascii_case("group-title") { group = Some(v); }
+                    b't' => {
+                        if k.eq_ignore_ascii_case("tvg-id") { tvg_id = Some(v); }
+                        else if k.eq_ignore_ascii_case("tvg-logo") { tvg_logo = Some(v); }
+                        else if k.eq_ignore_ascii_case("tvg-name") { tvg_name = Some(v); }
+                        else if k.eq_ignore_ascii_case("tvg-chno") { tvg_chno = Some(v); }
+                    }
+                    b'c' => {
+                        if k.eq_ignore_ascii_case("channel-id") { channel_id = Some(v); }
+                        else if k.eq_ignore_ascii_case("channel-number") { channel_number = Some(v); }
+                        else if k.eq_ignore_ascii_case("catchup") { catchup = Some(v); }
+                        else if k.eq_ignore_ascii_case("catchup-days") { catchup_days = Some(v); }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
+        (group, tvg_id, tvg_logo, tvg_name, tvg_chno, channel_id, channel_number, catchup, catchup_days)
     }
 }
 
