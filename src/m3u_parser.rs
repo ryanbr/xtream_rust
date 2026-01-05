@@ -113,11 +113,38 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
         
         if let Some(info_part) = info_part {
             current_attrs.clear();
-            extract_attrs_fast(info_part, &mut current_attrs);
             
-            // Extract channel name (after the last comma)
-            if let Some(comma_pos) = info_part.rfind(',') {
-                current_name = Some(info_part[comma_pos + 1..].trim());
+            // Check format: standard has attrs before last comma, alternate has attrs after first comma
+            // Standard: "-1 tvg-id="x" group-title="y",Channel Name"
+            // Alternate: "10.000000,TVG-ID="x" tvg-name="y",Channel Name"
+            
+            // Find first comma (after duration)
+            if let Some(first_comma) = info_part.find(',') {
+                let before_first_comma = &info_part[..first_comma];
+                let after_first_comma = &info_part[first_comma + 1..];
+                
+                // Check if attributes are before or after the first comma
+                if before_first_comma.contains('=') {
+                    // Standard format: attrs before comma
+                    extract_attrs_fast(info_part, &mut current_attrs);
+                    // Name is after last comma
+                    if let Some(last_comma) = info_part.rfind(',') {
+                        current_name = Some(info_part[last_comma + 1..].trim());
+                    }
+                } else {
+                    // Alternate format: duration,attrs,name
+                    extract_attrs_fast(after_first_comma, &mut current_attrs);
+                    // Name is after last comma
+                    if let Some(last_comma) = after_first_comma.rfind(',') {
+                        current_name = Some(after_first_comma[last_comma + 1..].trim());
+                    } else {
+                        // No second comma, entire after_first_comma is the name
+                        current_name = Some(after_first_comma.trim());
+                    }
+                }
+            } else {
+                // No comma at all - just try to extract attrs
+                extract_attrs_fast(info_part, &mut current_attrs);
             }
         } else if !line.is_empty() && !line.starts_with('#') && !line.starts_with("EXTM3U") {
             // This is a URL line (skip EXTM3U without #)
@@ -455,5 +482,24 @@ https://example.com/stream.m3u8
         assert_eq!(channels[0].channel_number, Some(750));
         assert_eq!(channels[0].tvg_name, Some("JPCAM".to_string()));
         assert_eq!(channels[0].tvg_logo, Some("https://example.com/logo.png".to_string()));
+    }
+
+    #[test]
+    fn test_parse_attrs_after_duration_comma() {
+        // Alternate format: duration,attrs,name (attrs after first comma)
+        let content = r#"#EXTM3U
+#EXTINF:10.000000,TVG-ID="Channel1" tvg-name="Channel 1" tvg-logo="http://example.com/channel1.png" group-title="Entertainment",Channel 1
+http://example.com/stream1.ts
+#EXTINF:10.000000,TVG-ID="Channel2" tvg-name="Channel 2" tvg-logo="http://example.com/channel2.png" group-title="Entertainment",Channel 2
+http://example.com/stream2.ts
+"#;
+        let channels = parse_m3u(content);
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0].name, "Channel 1");
+        assert_eq!(channels[0].tvg_id, Some("Channel1".to_string()));
+        assert_eq!(channels[0].tvg_name, Some("Channel 1".to_string()));
+        assert_eq!(channels[0].group, Some("Entertainment".to_string()));
+        assert_eq!(channels[1].name, "Channel 2");
+        assert_eq!(channels[1].tvg_id, Some("Channel2".to_string()));
     }
 }
