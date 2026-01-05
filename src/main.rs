@@ -3117,21 +3117,21 @@ impl IPTVApp {
             _ => Vec::new(),
         };
         
-        // Horizontal + Vertical scroll area for the entire grid
-        egui::ScrollArea::both()
+        // Fixed time header row (outside scroll area)
+        ui.horizontal(|ui| {
+            ui.add_sized([channel_col_width, 20.0], egui::Label::new("")); // Channel column spacer
+            for label in &time_labels {
+                ui.add_sized([prog_col_width, 20.0], egui::Label::new(egui::RichText::new(label).strong()));
+            }
+        });
+        
+        ui.separator();
+        
+        // Vertical scroll area for channel rows only
+        egui::ScrollArea::vertical()
             .id_salt("epg_grid_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // Time header row
-                ui.horizontal(|ui| {
-                    ui.add_sized([channel_col_width, 20.0], egui::Label::new("")); // Channel column spacer
-                    for label in &time_labels {
-                        ui.add_sized([prog_col_width, 20.0], egui::Label::new(egui::RichText::new(label).strong()));
-                    }
-                });
-                
-                ui.separator();
-                
                 // Channel rows
                 for (channel_name, epg_id_opt) in &channels_to_show {
                     // Try to find EPG ID - first from provided, then from current_channels, then from EPG data
