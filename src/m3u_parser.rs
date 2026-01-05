@@ -1,4 +1,5 @@
 //! M3U playlist parser with HTTPS download support
+//! Supports both M3U/M3U Plus (IPTV) and M3U8 (HLS) formats
 
 #![allow(dead_code)]
 
@@ -32,6 +33,17 @@ pub struct M3uCredentials {
     pub password: String,
 }
 
+/// Detect if content is M3U8 (HLS) format
+fn is_hls_playlist(content: &str) -> bool {
+    // HLS playlists contain these tags
+    content.contains("#EXT-X-VERSION") ||
+    content.contains("#EXT-X-TARGETDURATION") ||
+    content.contains("#EXT-X-MEDIA-SEQUENCE") ||
+    content.contains("#EXT-X-STREAM-INF") ||
+    content.contains("#EXT-X-PLAYLIST-TYPE") ||
+    content.contains("#EXT-X-ENDLIST")
+}
+
 /// Download and parse M3U from URL (supports HTTP and HTTPS)
 pub fn download_and_parse(url: &str, user_agent: &str) -> Result<Vec<M3uChannel>, String> {
     let playlist = download_and_parse_playlist(url, user_agent)?;
@@ -61,14 +73,55 @@ pub fn download_and_parse_playlist(url: &str, user_agent: &str) -> Result<M3uPla
         .read_to_string()
         .map_err(|e| format!("Read failed: {}", e))?;
 
-    Ok(parse_m3u_playlist(&content))
+    let mut playlist = parse_m3u_playlist(&content);
+    
+    // For HLS media playlists (segments only), use the original URL as the stream
+    if playlist.channels.len() == 1 && playlist.channels[0].url.is_empty() {
+        playlist.channels[0].url = url.to_string();
+        // Try to extract a name from the URL
+        if let Some(name) = url.rsplit('/').next() {
+            if !name.is_empty() {
+                let name = name.trim_end_matches(".m3u8").trim_end_matches(".m3u");
+                if !name.is_empty() {
+                    playlist.channels[0].name = name.to_string();
+                }
+            }
+        }
+    }
+    
+    // For HLS master playlists, resolve relative URLs
+    if is_hls_playlist(&content) && !playlist.channels.is_empty() {
+        let base_url = get_base_url(url);
+        for channel in &mut playlist.channels {
+            if !channel.url.is_empty() && !channel.url.starts_with("http") {
+                channel.url = format!("{}/{}", base_url, channel.url);
+            }
+        }
+    }
+    
+    Ok(playlist)
+}
+
+/// Get base URL for resolving relative paths
+fn get_base_url(url: &str) -> String {
+    if let Some(pos) = url.rfind('/') {
+        url[..pos].to_string()
+    } else {
+        url.to_string()
+    }
 }
 
 /// Parse M3U and return playlist with EPG URL
 pub fn parse_m3u_playlist(content: &str) -> M3uPlaylist {
     let mut playlist = M3uPlaylist::default();
     
-    // Check first line for EPG URL
+    // Check if this is an HLS (M3U8) playlist
+    if is_hls_playlist(content) {
+        playlist.channels = parse_m3u8_hls(content);
+        return playlist;
+    }
+    
+    // Check first line for EPG URL (M3U Plus format)
     if let Some(first_line) = content.lines().next() {
         if first_line.starts_with("#EXTM3U") {
             // Extract x-tvg-url="..." or url-tvg="..."
@@ -79,6 +132,180 @@ pub fn parse_m3u_playlist(content: &str) -> M3uPlaylist {
     
     playlist.channels = parse_m3u(content);
     playlist
+}
+
+/// Parse M3U8 HLS playlist (master or media playlist)
+fn parse_m3u8_hls(content: &str) -> Vec<M3uChannel> {
+    let mut channels = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        
+        // Master playlist: #EXT-X-STREAM-INF contains stream variants
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            // Extract bandwidth and resolution for name
+            let bandwidth = extract_hls_attr(line, "BANDWIDTH");
+            let resolution = extract_hls_attr(line, "RESOLUTION");
+            let name = extract_hls_attr(line, "NAME");
+            let video_range = extract_hls_attr(line, "VIDEO-RANGE");
+            let codecs = extract_hls_attr(line, "CODECS");
+            
+            // Next line should be the URL
+            if i + 1 < lines.len() {
+                let url_line = lines[i + 1].trim();
+                if !url_line.is_empty() && !url_line.starts_with('#') {
+                    let display_name = name.unwrap_or_else(|| {
+                        // Determine HDR type from VIDEO-RANGE and codecs
+                        let hdr_label = match video_range.as_deref() {
+                            Some("PQ") | Some("HLG") => {
+                                // Check for Dolby Vision codecs
+                                if codecs.as_ref().map(|c| c.contains("dvh") || c.contains("dvhe")).unwrap_or(false) {
+                                    Some("Dolby Vision")
+                                } else {
+                                    Some("HDR10")
+                                }
+                            }
+                            Some("SDR") => Some("SDR"),
+                            _ => None,
+                        };
+                        
+                        // Build name from resolution + bandwidth + HDR type
+                        let mut parts = Vec::new();
+                        if let Some(res) = &resolution {
+                            parts.push(res.clone());
+                        }
+                        if let Some(bw) = &bandwidth {
+                            parts.push(format_bandwidth(bw));
+                        }
+                        if let Some(hdr) = hdr_label {
+                            parts.push(hdr.to_string());
+                        }
+                        
+                        if parts.is_empty() {
+                            format!("Stream {}", channels.len() + 1)
+                        } else {
+                            parts.join(" - ")
+                        }
+                    });
+                    
+                    channels.push(M3uChannel {
+                        name: display_name,
+                        url: url_line.to_string(),
+                        group: Some("HLS Streams".to_string()),
+                        tvg_id: None,
+                        tvg_logo: None,
+                        tvg_name: None,
+                        tvg_chno: None,
+                        channel_id: None,
+                        channel_number: None,
+                        catchup: None,
+                        catchup_days: None,
+                    });
+                    i += 1;
+                }
+            }
+        }
+        // Alternate streams: #EXT-X-MEDIA with URI (multi-angle, audio tracks, etc.)
+        else if line.starts_with("#EXT-X-MEDIA:") {
+            if let Some(uri) = extract_hls_attr(line, "URI") {
+                let media_type = extract_hls_attr(line, "TYPE").unwrap_or_default();
+                let name = extract_hls_attr(line, "NAME").unwrap_or_else(|| "Alternate".to_string());
+                let group_id = extract_hls_attr(line, "GROUP-ID").unwrap_or_default();
+                let is_default = extract_hls_attr(line, "DEFAULT")
+                    .map(|v| v.eq_ignore_ascii_case("YES"))
+                    .unwrap_or(false);
+                
+                // Skip default streams (they're usually in EXT-X-STREAM-INF too)
+                if !is_default {
+                    let display_name = if !group_id.is_empty() {
+                        format!("{} ({})", name, group_id)
+                    } else {
+                        name
+                    };
+                    
+                    let group = match media_type.to_uppercase().as_str() {
+                        "VIDEO" => "HLS Video".to_string(),
+                        "AUDIO" => "HLS Audio".to_string(),
+                        "SUBTITLES" => "HLS Subtitles".to_string(),
+                        _ => "HLS Alternate".to_string(),
+                    };
+                    
+                    channels.push(M3uChannel {
+                        name: display_name,
+                        url: uri,
+                        group: Some(group),
+                        tvg_id: None,
+                        tvg_logo: None,
+                        tvg_name: None,
+                        tvg_chno: None,
+                        channel_id: None,
+                        channel_number: None,
+                        catchup: None,
+                        catchup_days: None,
+                    });
+                }
+            }
+        }
+        // Media playlist with #EXTINF segments - treat as single stream
+        else if line.starts_with("#EXT-X-TARGETDURATION:") && channels.is_empty() {
+            // This is a media playlist (segments), not a master playlist
+            // Return a single "channel" representing the whole stream
+            channels.push(M3uChannel {
+                name: "HLS Stream".to_string(),
+                url: String::new(), // Will be set by caller with original URL
+                group: Some("HLS".to_string()),
+                tvg_id: None,
+                tvg_logo: None,
+                tvg_name: None,
+                tvg_chno: None,
+                channel_id: None,
+                channel_number: None,
+                catchup: None,
+                catchup_days: None,
+            });
+            // For media playlists, the original URL is the stream URL
+            break;
+        }
+        
+        i += 1;
+    }
+    
+    channels
+}
+
+/// Extract attribute from HLS tag (e.g., BANDWIDTH=1280000)
+fn extract_hls_attr(line: &str, attr: &str) -> Option<String> {
+    let search = format!("{}=", attr);
+    if let Some(start) = line.find(&search) {
+        let rest = &line[start + search.len()..];
+        // Handle quoted and unquoted values
+        if rest.starts_with('"') {
+            if let Some(end) = rest[1..].find('"') {
+                return Some(rest[1..end + 1].to_string());
+            }
+        } else {
+            let end = rest.find(',').unwrap_or(rest.len());
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
+/// Format bandwidth to human-readable (e.g., 1280000 -> "1.3 Mbps")
+fn format_bandwidth(bw: &str) -> String {
+    if let Ok(bits) = bw.parse::<u64>() {
+        if bits >= 1_000_000 {
+            format!("{:.1} Mbps", bits as f64 / 1_000_000.0)
+        } else if bits >= 1_000 {
+            format!("{} Kbps", bits / 1_000)
+        } else {
+            format!("{} bps", bits)
+        }
+    } else {
+        bw.to_string()
+    }
 }
 
 /// Extract attribute from #EXTM3U header line
@@ -427,134 +654,5 @@ fn extract_from_path(url: &str) -> Option<M3uCredentials> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_query_credentials() {
-        let url = "http://example.com/get.php?username=john&password=secret&type=m3u_plus";
-        let creds = extract_credentials(url).unwrap();
-        assert_eq!(creds.username, "john");
-        assert_eq!(creds.password, "secret");
-        assert_eq!(creds.server, "http://example.com");
-    }
-
-    #[test]
-    fn test_extract_path_credentials() {
-        let url = "http://example.com:8080/live/myuser/mypass/123.ts";
-        let creds = extract_credentials(url).unwrap();
-        assert_eq!(creds.username, "myuser");
-        assert_eq!(creds.password, "mypass");
-    }
-
-    #[test]
-    fn test_parse_m3u() {
-        let content = r#"
-#EXTM3U
-#EXTINF:-1 tvg-id="cnn" group-title="News",CNN
-http://example.com/live/user/pass/1.ts
-#EXTINF:-1 tvg-id="bbc" group-title="News",BBC
-http://example.com/live/user/pass/2.ts
-"#;
-        let channels = parse_m3u(content);
-        assert_eq!(channels.len(), 2);
-        assert_eq!(channels[0].name, "CNN");
-        assert_eq!(channels[0].group, Some("News".to_string()));
-    }
-
-    #[test]
-    fn test_parse_m3u_with_epg_url() {
-        let content = r#"#EXTM3U x-tvg-url="http://example.com/epg.xml"
-#EXTINF:-1 tvg-id="ch1" tvg-name="Channel One" group-title="General" catchup="default" catchup-days="7",Channel 1
-http://example.com/live/user/pass/1.ts
-"#;
-        let playlist = parse_m3u_playlist(content);
-        assert_eq!(playlist.epg_url, Some("http://example.com/epg.xml".to_string()));
-        assert_eq!(playlist.channels.len(), 1);
-        assert_eq!(playlist.channels[0].tvg_name, Some("Channel One".to_string()));
-        assert_eq!(playlist.channels[0].catchup, Some("default".to_string()));
-        assert_eq!(playlist.channels[0].catchup_days, Some(7));
-    }
-
-    #[test]
-    fn test_parse_attrs_unquoted() {
-        let content = r#"#EXTM3U
-#EXTINF:-1 tvg-id=unquoted group-title="Quoted Group",Test Channel
-http://example.com/stream.ts
-"#;
-        let channels = parse_m3u(content);
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].tvg_id, Some("unquoted".to_string()));
-        assert_eq!(channels[0].group, Some("Quoted Group".to_string()));
-    }
-
-    #[test]
-    fn test_parse_malformed_stray_quotes() {
-        // Real-world format with stray quote before tvg-name
-        let content = r#"#EXTM3U
-#EXTINF:0 tvg-logo="https://example.com/logo.png" "tvg-name="SRF1.ch" tvg-chno="1108" group-title="Deutsch", SRF 1 FHD
-udp://@233.50.230.1:5000
-"#;
-        let channels = parse_m3u(content);
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].name, "SRF 1 FHD");
-        assert_eq!(channels[0].tvg_logo, Some("https://example.com/logo.png".to_string()));
-        assert_eq!(channels[0].tvg_name, Some("SRF1.ch".to_string()));
-        assert_eq!(channels[0].tvg_chno, Some(1108));
-        assert_eq!(channels[0].group, Some("Deutsch".to_string()));
-        assert_eq!(channels[0].url, "udp://@233.50.230.1:5000");
-    }
-
-    #[test]
-    fn test_parse_extinf_without_hash() {
-        // Some malformed M3Us have EXTINF without # prefix
-        let content = r#"#EXTM3U
-#EXTINF:-1 tvg-id="" tvg-name="Channel 1" group-title="Group",Channel 1
-http://example.com/1.mp4
-EXTINF:-1 tvg-id="" tvg-name="Channel 2" group-title="Group",Channel 2
-http://example.com/2.mp4
-#EXTINF:-1 tvg-id="" tvg-name="Channel 3" group-title="Group",Channel 3
-http://example.com/3.mp4
-"#;
-        let channels = parse_m3u(content);
-        assert_eq!(channels.len(), 3);
-        assert_eq!(channels[0].name, "Channel 1");
-        assert_eq!(channels[1].name, "Channel 2");
-        assert_eq!(channels[2].name, "Channel 3");
-    }
-
-    #[test]
-    fn test_parse_channel_id_and_number() {
-        // Channels DVR format with channel-id and channel-number
-        let content = r#"#EXTM3U
-#EXTINF:-1 channel-id="JPCAM" channel-number="750" tvg-logo="https://example.com/logo.png" tvg-name="JPCAM",JPCAM
-https://example.com/stream.m3u8
-"#;
-        let channels = parse_m3u(content);
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].name, "JPCAM");
-        assert_eq!(channels[0].channel_id, Some("JPCAM".to_string()));
-        assert_eq!(channels[0].channel_number, Some(750));
-        assert_eq!(channels[0].tvg_name, Some("JPCAM".to_string()));
-        assert_eq!(channels[0].tvg_logo, Some("https://example.com/logo.png".to_string()));
-    }
-
-    #[test]
-    fn test_parse_attrs_after_duration_comma() {
-        // Alternate format: duration,attrs,name (attrs after first comma)
-        let content = r#"#EXTM3U
-#EXTINF:10.000000,TVG-ID="Channel1" tvg-name="Channel 1" tvg-logo="http://example.com/channel1.png" group-title="Entertainment",Channel 1
-http://example.com/stream1.ts
-#EXTINF:10.000000,TVG-ID="Channel2" tvg-name="Channel 2" tvg-logo="http://example.com/channel2.png" group-title="Entertainment",Channel 2
-http://example.com/stream2.ts
-"#;
-        let channels = parse_m3u(content);
-        assert_eq!(channels.len(), 2);
-        assert_eq!(channels[0].name, "Channel 1");
-        assert_eq!(channels[0].tvg_id, Some("Channel1".to_string()));
-        assert_eq!(channels[0].tvg_name, Some("Channel 1".to_string()));
-        assert_eq!(channels[0].group, Some("Entertainment".to_string()));
-        assert_eq!(channels[1].name, "Channel 2");
-        assert_eq!(channels[1].tvg_id, Some("Channel2".to_string()));
-    }
-}
+#[path = "m3u_parser_tests.rs"]
+mod tests;
