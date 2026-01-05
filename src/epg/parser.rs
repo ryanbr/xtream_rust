@@ -59,30 +59,40 @@ impl EpgData {
         Self::default()
     }
 
-    /// Get current program for a channel
+    /// Get current program for a channel (uses binary search)
     pub fn current_program(&self, channel_id: &str) -> Option<&Program> {
         let now = current_timestamp();
-        self.programs
-            .get(channel_id)?
-            .iter()
-            .find(|p| p.start <= now && p.stop > now)
+        let programs = self.programs.get(channel_id)?;
+        
+        // Binary search: find first program that ends after now
+        let idx = programs.partition_point(|p| p.stop <= now);
+        programs.get(idx).filter(|p| p.start <= now)
     }
 
-    /// Get next program for a channel
+    /// Get next program for a channel (uses binary search)
     pub fn next_program(&self, channel_id: &str) -> Option<&Program> {
         let now = current_timestamp();
-        self.programs
-            .get(channel_id)?
-            .iter()
-            .find(|p| p.start > now)
+        let programs = self.programs.get(channel_id)?;
+        
+        // Binary search: find first program that starts after now
+        let idx = programs.partition_point(|p| p.start <= now);
+        programs.get(idx)
     }
 
-    /// Get programs for a channel within a time range
+    /// Get programs for a channel within a time range (uses binary search)
     pub fn programs_in_range(&self, channel_id: &str, start: i64, end: i64) -> Vec<&Program> {
-        self.programs
-            .get(channel_id)
-            .map(|progs| progs.iter().filter(|p| p.stop > start && p.start < end).collect())
-            .unwrap_or_default()
+        let Some(programs) = self.programs.get(channel_id) else {
+            return Vec::new();
+        };
+        
+        // Binary search: find first program that ends after start
+        let start_idx = programs.partition_point(|p| p.stop <= start);
+        
+        // Collect programs until we pass the end time
+        programs[start_idx..]
+            .iter()
+            .take_while(|p| p.start < end)
+            .collect()
     }
 
     /// Get all programs for today for a channel
@@ -495,7 +505,13 @@ impl<R: std::io::Read> std::io::BufRead for SanitizingBufReader<R> {
 }
 
 /// Decode XML entities back to normal characters
+/// Returns the original string if no entities found (avoids allocation)
 fn decode_xml_entities(s: &str) -> String {
+    // Fast path: if no & found, return as-is
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    
     let mut result = s.to_string();
     
     // Decode named entities
