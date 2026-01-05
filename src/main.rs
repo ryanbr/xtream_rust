@@ -393,6 +393,7 @@ struct IPTVApp {
     config: AppConfig,
     address_book: Vec<SavedCredential>,
     show_address_book: bool,
+    show_reset_confirm: bool,
     show_m3u_dialog: bool,
     m3u_url_input: String,
     
@@ -518,6 +519,7 @@ impl IPTVApp {
             config,
             address_book,
             show_address_book: false,
+            show_reset_confirm: false,
             show_m3u_dialog: false,
             m3u_url_input: String::new(),
             console_log: vec!["[INFO] Xtreme IPTV Player started".to_string()],
@@ -624,6 +626,64 @@ impl IPTVApp {
         
         self.config.save();
         self.status_message = "Settings saved".to_string();
+    }
+    
+    /// Reset all settings to defaults
+    fn reset_to_defaults(&mut self) {
+        // Clear server credentials
+        self.server.clear();
+        self.username.clear();
+        self.password.clear();
+        
+        // Clear address book
+        self.address_book.clear();
+        save_address_book(&self.address_book);
+        
+        // Clear favorites and recent
+        self.favorites.clear();
+        self.recent_watched.clear();
+        
+        // Clear EPG
+        self.epg_data = None;
+        self.epg_url_input.clear();
+        self.epg_last_update = None;
+        self.epg_time_offset = 0.0;
+        self.epg_auto_update = EpgAutoUpdate::Day1;
+        self.epg_show_actual_time = false;
+        self.epg_startup_loaded = false;
+        self.selected_epg_channel = None;
+        
+        // Reset player settings to defaults
+        self.external_player.clear();
+        self.buffer_seconds = 5;
+        self.connection_quality = ConnectionQuality::Normal;
+        self.hw_accel = true;
+        self.single_window_mode = true;
+        
+        // Reset user agent to defaults
+        self.selected_user_agent = 0;
+        self.custom_user_agent.clear();
+        self.use_custom_user_agent = false;
+        self.pass_user_agent_to_player = true;
+        self.use_post_method = false;
+        
+        // Clear current state
+        self.live_categories.clear();
+        self.movie_categories.clear();
+        self.series_categories.clear();
+        self.current_channels.clear();
+        self.current_series.clear();
+        self.current_seasons.clear();
+        self.current_episodes.clear();
+        self.navigation_stack.clear();
+        self.scroll_positions.clear();
+        self.logged_in = false;
+        
+        // Reset config and save
+        self.config = AppConfig::default();
+        self.config.save();
+        
+        self.log("All settings reset to defaults");
     }
     
     fn is_favorite(&self, url: &str) -> bool {
@@ -2249,6 +2309,55 @@ impl eframe::App for IPTVApp {
                         if ui.button("Close").clicked() {
                             self.show_address_book = false;
                         }
+                        
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(egui::RichText::new("⚠ Reset All Settings").color(egui::Color32::from_rgb(200, 80, 80)))
+                                .on_hover_text("Clear all settings, favorites, and recent history")
+                                .clicked() 
+                            {
+                                self.show_reset_confirm = true;
+                            }
+                        });
+                    });
+                });
+        }
+
+        // Reset Settings Confirmation Dialog
+        if self.show_reset_confirm {
+            egui::Window::new("⚠ Reset All Settings")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Are you sure you want to reset all settings?").strong());
+                    ui.add_space(10.0);
+                    
+                    ui.label("This will permanently delete:");
+                    ui.label("  • Server credentials");
+                    ui.label("  • Address book entries");
+                    ui.label("  • Favorites");
+                    ui.label("  • Recent watch history");
+                    ui.label("  • EPG settings");
+                    ui.label("  • Player settings");
+                    
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("This action cannot be undone!").color(egui::Color32::from_rgb(200, 80, 80)));
+                    ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.show_reset_confirm = false;
+                        }
+                        
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(egui::RichText::new("Reset Everything").color(egui::Color32::from_rgb(200, 80, 80))).clicked() {
+                                self.reset_to_defaults();
+                                self.show_reset_confirm = false;
+                                self.show_address_book = false;
+                                self.status_message = "All settings have been reset".to_string();
+                            }
+                        });
                     });
                 });
         }
