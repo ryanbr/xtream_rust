@@ -13,7 +13,9 @@ pub struct M3uChannel {
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
     pub tvg_name: Option<String>,      // Alternate name for EPG matching
-    pub tvg_chno: Option<u32>,          // Channel number
+    pub tvg_chno: Option<u32>,          // Channel number (tvg-chno)
+    pub channel_id: Option<String>,     // Channel ID (channel-id)
+    pub channel_number: Option<u32>,    // Channel number (channel-number)
     pub catchup: Option<String>,        // Catchup type (default, shift, etc.)
     pub catchup_days: Option<u32>,      // Days of catchup available
 }
@@ -128,6 +130,9 @@ pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
                     tvg_logo: current_attrs.get("tvg-logo").map(|s| s.to_string()),
                     tvg_name: current_attrs.get("tvg-name").map(|s| s.to_string()),
                     tvg_chno: current_attrs.get("tvg-chno")
+                        .and_then(|s| s.parse().ok()),
+                    channel_id: current_attrs.get("channel-id").map(|s| s.to_string()),
+                    channel_number: current_attrs.get("channel-number")
                         .and_then(|s| s.parse().ok()),
                     catchup: current_attrs.get("catchup").map(|s| s.to_string()),
                     catchup_days: current_attrs.get("catchup-days")
@@ -434,5 +439,21 @@ http://example.com/3.mp4
         assert_eq!(channels[0].name, "Channel 1");
         assert_eq!(channels[1].name, "Channel 2");
         assert_eq!(channels[2].name, "Channel 3");
+    }
+
+    #[test]
+    fn test_parse_channel_id_and_number() {
+        // Channels DVR format with channel-id and channel-number
+        let content = r#"#EXTM3U
+#EXTINF:-1 channel-id="JPCAM" channel-number="750" tvg-logo="https://example.com/logo.png" tvg-name="JPCAM",JPCAM
+https://example.com/stream.m3u8
+"#;
+        let channels = parse_m3u(content);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].name, "JPCAM");
+        assert_eq!(channels[0].channel_id, Some("JPCAM".to_string()));
+        assert_eq!(channels[0].channel_number, Some(750));
+        assert_eq!(channels[0].tvg_name, Some("JPCAM".to_string()));
+        assert_eq!(channels[0].tvg_logo, Some("https://example.com/logo.png".to_string()));
     }
 }
