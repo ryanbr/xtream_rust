@@ -2040,6 +2040,7 @@ impl eframe::App for IPTVApp {
                     .default_width(300.0)
                     .min_width(200.0)
                     .max_width(450.0)
+                    .frame(egui::Frame::none())
                     .show_inside(ui, |ui| {
                         // Restore scroll position if pending
                         let scroll_offset = self.pending_scroll_restore.take();
@@ -2053,7 +2054,7 @@ impl eframe::App for IPTVApp {
                         }
                         
                         let scroll_output = scroll_area.show(ui, |ui| {
-                                ui.set_min_width(ui.available_width() - 15.0); // Leave room for scrollbar
+                                ui.set_min_width(ui.available_width());
                                 match self.current_tab {
                                     Tab::Live => self.show_live_tab(ui),
                                     Tab::Movies => self.show_movies_tab(ui),
