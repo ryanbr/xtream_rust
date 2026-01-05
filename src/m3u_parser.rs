@@ -93,130 +93,145 @@ fn extract_header_attr(line: &str, attr_name: &str) -> Option<String> {
 
 /// Parse M3U content and extract channels
 pub fn parse_m3u(content: &str) -> Vec<M3uChannel> {
-    let mut channels = Vec::new();
-    let mut current_attrs: HashMap<String, String> = HashMap::new();
-    let mut current_name: Option<String> = None;
-
+    // Pre-allocate based on rough estimate (one channel per ~200 bytes)
+    let estimated_channels = content.len() / 200;
+    let mut channels = Vec::with_capacity(estimated_channels.max(100));
+    
+    // Reuse buffers to avoid allocations
+    let mut current_attrs = AttrBuffer::new();
+    let mut current_name: Option<&str> = None;
+    
     for line in content.lines() {
         let line = line.trim();
-
-        if line.starts_with("#EXTINF:") {
-            // Parse EXTINF line
-            let info_part = &line[8..];
+        
+        if let Some(info_part) = line.strip_prefix("#EXTINF:") {
             current_attrs.clear();
-
-            // Extract attributes using robust parser
-            extract_attrs(info_part, &mut current_attrs);
-
+            extract_attrs_fast(info_part, &mut current_attrs);
+            
             // Extract channel name (after the last comma)
             if let Some(comma_pos) = info_part.rfind(',') {
-                current_name = Some(info_part[comma_pos + 1..].trim().to_string());
+                current_name = Some(info_part[comma_pos + 1..].trim());
             }
         } else if !line.is_empty() && !line.starts_with('#') {
             // This is a URL line
             if let Some(name) = current_name.take() {
                 channels.push(M3uChannel {
-                    name,
+                    name: name.to_string(),
                     url: line.to_string(),
-                    group: current_attrs.get("group-title").cloned(),
-                    tvg_id: current_attrs.get("tvg-id").cloned(),
-                    tvg_logo: current_attrs.get("tvg-logo").cloned(),
-                    tvg_name: current_attrs.get("tvg-name").cloned(),
-                    catchup: current_attrs.get("catchup").cloned(),
+                    group: current_attrs.get("group-title").map(|s| s.to_string()),
+                    tvg_id: current_attrs.get("tvg-id").map(|s| s.to_string()),
+                    tvg_logo: current_attrs.get("tvg-logo").map(|s| s.to_string()),
+                    tvg_name: current_attrs.get("tvg-name").map(|s| s.to_string()),
+                    catchup: current_attrs.get("catchup").map(|s| s.to_string()),
                     catchup_days: current_attrs.get("catchup-days")
                         .and_then(|s| s.parse().ok()),
                 });
             }
         }
     }
-
+    
     channels
 }
 
-/// Extract attributes from EXTINF line - handles quoted and unquoted values
-fn extract_attrs(info: &str, attrs: &mut HashMap<String, String>) {
-    let mut chars = info.chars().peekable();
+/// Lightweight attribute buffer - avoids HashMap overhead
+struct AttrBuffer<'a> {
+    attrs: [Option<(&'a str, &'a str)>; 8], // Most M3Us have <8 attrs per line
+    len: usize,
+}
+
+impl<'a> AttrBuffer<'a> {
+    fn new() -> Self {
+        Self {
+            attrs: [None; 8],
+            len: 0,
+        }
+    }
     
-    while chars.peek().is_some() {
-        // Skip whitespace and commas
-        while let Some(&c) = chars.peek() {
-            if c.is_whitespace() || c == ',' || c == '-' && attrs.is_empty() {
-                chars.next();
-            } else {
-                break;
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+    
+    fn push(&mut self, key: &'a str, value: &'a str) {
+        if self.len < 8 {
+            self.attrs[self.len] = Some((key, value));
+            self.len += 1;
+        }
+    }
+    
+    fn get(&self, key: &str) -> Option<&'a str> {
+        for i in 0..self.len {
+            if let Some((k, v)) = self.attrs[i] {
+                if k.eq_ignore_ascii_case(key) {
+                    return Some(v);
+                }
             }
         }
+        None
+    }
+}
+
+/// Fast attribute extraction using byte scanning
+fn extract_attrs_fast<'a>(info: &'a str, attrs: &mut AttrBuffer<'a>) {
+    let bytes = info.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    
+    // Skip duration (e.g., "-1 ")
+    while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b'-' || bytes[i] == b'.') {
+        i += 1;
+    }
+    
+    while i < len {
+        // Skip whitespace
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
         
-        // Skip the duration number at the start (e.g., "-1")
-        if attrs.is_empty() {
-            while let Some(&c) = chars.peek() {
-                if c.is_ascii_digit() || c == '-' || c == '.' {
-                    chars.next();
-                } else {
+        if i >= len { break; }
+        
+        // Check for comma (end of attributes, start of name)
+        if bytes[i] == b',' { break; }
+        
+        // Find key (until '=')
+        let key_start = i;
+        while i < len && bytes[i] != b'=' && bytes[i] != b',' {
+            i += 1;
+        }
+        
+        if i >= len || bytes[i] == b',' { break; }
+        
+        let key = &info[key_start..i];
+        i += 1; // skip '='
+        
+        if i >= len { break; }
+        
+        // Get value
+        let value = if bytes[i] == b'"' {
+            i += 1; // skip opening quote
+            let value_start = i;
+            // Find closing quote (handle escaped quotes)
+            while i < len {
+                if bytes[i] == b'"' && (i == value_start || bytes[i - 1] != b'\\') {
                     break;
                 }
+                i += 1;
             }
-            // Skip whitespace after duration
-            while let Some(&c) = chars.peek() {
-                if c.is_whitespace() {
-                    chars.next();
-                } else {
-                    break;
-                }
+            let value = &info[value_start..i];
+            if i < len { i += 1; } // skip closing quote
+            value
+        } else {
+            // Unquoted value - read until space or comma
+            let value_start = i;
+            while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b',' {
+                i += 1;
             }
-        }
+            &info[value_start..i]
+        };
         
-        // Collect key until '='
-        let mut key = String::new();
-        while let Some(&c) = chars.peek() {
-            if c == '=' {
-                chars.next(); // consume '='
-                break;
-            }
-            if c == ',' {
-                // No more attributes, rest is channel name
-                return;
-            }
-            key.push(chars.next().unwrap());
-        }
-        
-        let key = key.trim().to_lowercase();
-        if key.is_empty() { 
-            continue; 
-        }
-        
-        // Get value - check if quoted
-        match chars.peek() {
-            Some(&'"') => {
-                chars.next(); // consume opening quote
-                let mut value = String::new();
-                while let Some(c) = chars.next() {
-                    if c == '"' { break; }
-                    // Handle escaped quotes
-                    if c == '\\' {
-                        if let Some(&next) = chars.peek() {
-                            if next == '"' {
-                                value.push(chars.next().unwrap());
-                                continue;
-                            }
-                        }
-                    }
-                    value.push(c);
-                }
-                attrs.insert(key, value);
-            }
-            Some(_) => {
-                // Unquoted value - read until space or comma
-                let mut value = String::new();
-                while let Some(&c) = chars.peek() {
-                    if c.is_whitespace() || c == ',' { break; }
-                    value.push(chars.next().unwrap());
-                }
-                if !value.is_empty() {
-                    attrs.insert(key, value);
-                }
-            }
-            None => {}
+        // Store attribute (lowercase key for matching)
+        let key_trimmed = key.trim();
+        if !key_trimmed.is_empty() && !value.is_empty() {
+            attrs.push(key_trimmed, value);
         }
     }
 }
