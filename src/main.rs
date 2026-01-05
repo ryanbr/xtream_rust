@@ -1168,6 +1168,47 @@ impl IPTVApp {
             .as_secs() as i64;
         now - offset_secs
     }
+    
+    /// Display EPG info inline for a channel (used in Live/Favorites/Recent tabs)
+    /// If epg_channel_id is provided, uses it directly. Otherwise looks up by channel name.
+    fn show_epg_inline(&self, ui: &mut egui::Ui, channel_name: &str, epg_channel_id: Option<&str>) {
+        let Some(ref epg) = self.epg_data else { return };
+        
+        // Use provided ID or find by name match
+        let epg_id: Option<String> = epg_channel_id
+            .map(|id| id.to_string())
+            .or_else(|| {
+                epg.channels.iter()
+                    .find(|(_, ch)| {
+                        contains_ignore_case(&ch.name, channel_name) ||
+                        contains_ignore_case(channel_name, &ch.name)
+                    })
+                    .map(|(id, _)| id.clone())
+            });
+        
+        let Some(epg_id) = epg_id else { return };
+        let Some(program) = self.get_current_program(&epg_id) else { return };
+        
+        // Truncate title
+        let short_title: String = program.title.chars().take(20).collect();
+        let display_title = if program.title.len() > 20 {
+            format!("{}…", short_title)
+        } else {
+            short_title
+        };
+        
+        ui.label(" | ");
+        ui.label(egui::RichText::new(&display_title)
+            .color(egui::Color32::LIGHT_BLUE)
+            .italics());
+        
+        let remaining = (program.stop - self.get_adjusted_now()) / 60;
+        if remaining > 0 {
+            ui.label(egui::RichText::new(format!("({}m left)", remaining))
+                .small()
+                .color(egui::Color32::GRAY));
+        }
+    }
 
     fn play_channel(&mut self, channel: &Channel) {
         // Add to recently watched
@@ -2704,37 +2745,9 @@ impl IPTVApp {
                     
                     ui.label(egui::RichText::new(&display_name).strong());
                     
-                    // Show EPG info if available (only for live streams) - truncated to avoid overlap
+                    // Show EPG info if available (only for live streams)
                     if stream_type == "live" {
-                        if let Some(epg_id) = &channel.epg_channel_id {
-                            if let Some(program) = self.get_current_program(epg_id) {
-                                // Truncate title for inline display
-                                let short_title: String = program.title.chars().take(20).collect();
-                                let display_title = if program.title.len() > 20 {
-                                    format!("{}…", short_title)
-                                } else {
-                                    short_title
-                                };
-                                
-                                ui.label(" | ");
-                                ui.label(egui::RichText::new(&display_title)
-                                    .color(egui::Color32::LIGHT_BLUE)
-                                    .italics());
-                                
-                                let offset_secs = (self.epg_time_offset * 3600.0) as i64;
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
-                                let adjusted_now = now - offset_secs;
-                                let remaining = (program.stop - adjusted_now) / 60;
-                                if remaining > 0 {
-                                    ui.label(egui::RichText::new(format!("({}m left)", remaining))
-                                        .small()
-                                        .color(egui::Color32::GRAY));
-                                }
-                            }
-                        }
+                        self.show_epg_inline(ui, &channel.name, channel.epg_channel_id.as_deref());
                     }
                 });
             }
@@ -2907,6 +2920,7 @@ impl IPTVApp {
                                 to_play = Some(fav.clone());
                             }
                             ui.label(Self::sanitize_text(&fav.name));
+                            self.show_epg_inline(ui, &fav.name, None);
                             ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
                         });
                     }
@@ -3042,6 +3056,12 @@ impl IPTVApp {
                 ui.label(type_icon);
                 
                 ui.label(Self::sanitize_text(&item.name));
+                
+                // Show EPG info for live streams
+                if item.stream_type == "live" {
+                    self.show_epg_inline(ui, &item.name, None);
+                }
+                
                 ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&item.category_name))).weak());
                 
                 // Remove from history button
