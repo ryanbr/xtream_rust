@@ -63,9 +63,16 @@ pub struct ServerInfo {
 pub struct FavoriteItem {
     pub name: String,
     pub url: String,
-    pub stream_type: String, // "live", "movie", "series"
+    pub stream_type: String, // "live", "movie", "series", "season", "episode"
     pub stream_id: Option<i64>,
     pub series_id: Option<i64>,
     pub category_name: String,
     pub container_extension: Option<String>,
+    // For season/episode favorites
+    #[serde(default)]
+    pub season_num: Option<i32>,
+    #[serde(default)]
+    pub episode_num: Option<i32>,
+    #[serde(default)]
+    pub series_name: Option<String>,
 }

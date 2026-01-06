@@ -28,6 +28,41 @@ impl ConnectionQuality {
     }
 }
 
+/// Sort order for content lists
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum SortOrder {
+    #[default]
+    Default,      // Server order (as received)
+    NameAsc,      // A-Z
+    NameDesc,     // Z-A
+}
+
+impl SortOrder {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SortOrder::Default => "Default",
+            SortOrder::NameAsc => "Name A-Z",
+            SortOrder::NameDesc => "Name Z-A",
+        }
+    }
+    
+    pub fn cycle(&self) -> Self {
+        match self {
+            SortOrder::Default => SortOrder::NameAsc,
+            SortOrder::NameAsc => SortOrder::NameDesc,
+            SortOrder::NameDesc => SortOrder::Default,
+        }
+    }
+    
+    pub fn icon(&self) -> &'static str {
+        match self {
+            SortOrder::Default => "⇅",
+            SortOrder::NameAsc => "↑",
+            SortOrder::NameDesc => "↓",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -79,6 +114,13 @@ pub struct AppConfig {
     pub epg_time_offset: f32,
     #[serde(default)]
     pub epg_show_actual_time: bool,
+    // Sort settings
+    #[serde(default)]
+    pub live_sort_order: SortOrder,
+    #[serde(default)]
+    pub movie_sort_order: SortOrder,
+    #[serde(default)]
+    pub series_sort_order: SortOrder,
 }
 
 fn default_buffer() -> u32 { 5 }
@@ -112,6 +154,9 @@ impl Default for AppConfig {
             epg_auto_update_index: 3, // 1 Day
             epg_time_offset: 0.0,
             epg_show_actual_time: false,
+            live_sort_order: SortOrder::Default,
+            movie_sort_order: SortOrder::Default,
+            series_sort_order: SortOrder::Default,
         }
     }
 }

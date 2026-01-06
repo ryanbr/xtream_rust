@@ -180,6 +180,9 @@ enum TaskResult {
         channels: Vec<Channel>,
         playlist_name: Option<String>,
     },
+    // Favorites series viewing
+    FavSeasonsLoaded(Vec<i32>),
+    FavEpisodesLoaded(Vec<Episode>),
     Error(String),
     PlayerLog(String),
     PlayerExited { code: Option<i32>, stderr: String },
@@ -369,8 +372,19 @@ struct IPTVApp {
     current_seasons: Vec<i32>,
     current_episodes: Vec<Episode>,
     
+    // Sort settings (persisted)
+    live_sort_order: SortOrder,
+    movie_sort_order: SortOrder,
+    series_sort_order: SortOrder,
+    
     // Favorites
     favorites: Vec<FavoriteItem>,
+    
+    // Favorite series viewing state (for inline seasons/episodes in Favorites tab)
+    fav_viewing_series: Option<(i64, String)>, // (series_id, series_name)
+    fav_series_seasons: Vec<i32>,
+    fav_series_episodes: Vec<Episode>,
+    fav_viewing_season: Option<i32>,
     
     // Recently watched (last 20)
     recent_watched: Vec<FavoriteItem>,
@@ -515,7 +529,14 @@ impl IPTVApp {
             current_series: Vec::new(),
             current_seasons: Vec::new(),
             current_episodes: Vec::new(),
+            live_sort_order: config.live_sort_order,
+            movie_sort_order: config.movie_sort_order,
+            series_sort_order: config.series_sort_order,
             favorites,
+            fav_viewing_series: None,
+            fav_series_seasons: Vec::new(),
+            fav_series_episodes: Vec::new(),
+            fav_viewing_season: None,
             recent_watched,
             navigation_stack: Vec::new(),
             scroll_positions: Vec::new(),
@@ -731,6 +752,41 @@ impl IPTVApp {
     }
     
     fn play_favorite(&mut self, fav: &FavoriteItem) {
+        // Series and season favorites are handled inline in favorites tab
+        if fav.stream_type == "series" || fav.stream_type == "season" {
+            return;
+        }
+        
+        // Handle episode favorites - play directly
+        if fav.stream_type == "episode" {
+            if let (Some(series_id), Some(stream_id), Some(_season), Some(_ep_num)) = 
+                (fav.series_id, fav.stream_id, fav.season_num, fav.episode_num) {
+                // Build episode URL directly to avoid navigation dependency
+                let container = fav.container_extension.clone().unwrap_or_else(|| "mp4".to_string());
+                let url = format!(
+                    "{}/series/{}/{}/{}.{}",
+                    self.server, self.username, self.password,
+                    stream_id, container
+                );
+                
+                // Use the full name stored in favorite (includes series name)
+                let channel = Channel {
+                    name: fav.name.clone(),
+                    url,
+                    stream_id: Some(stream_id),
+                    category_id: None,
+                    epg_channel_id: None,
+                    stream_icon: None,
+                    series_id: Some(series_id),
+                    container_extension: Some(container),
+                };
+                
+                self.play_channel(&channel);
+                return;
+            }
+        }
+        
+        // Handle live/movie favorites - play directly
         let channel = Channel {
             name: fav.name.clone(),
             url: fav.url.clone(),
@@ -1092,6 +1148,82 @@ impl IPTVApp {
         });
     }
 
+    // Fetch series info for favorites tab (doesn't change main navigation)
+    fn fetch_fav_series_info(&mut self, series_id: i64) {
+        self.loading = true;
+        self.status_message = "Loading seasons...".to_string();
+        
+        let ctx = self.fetch_context();
+
+        thread::spawn(move || {
+            let client = ctx.client();
+            
+            if let Ok(info) = client.get_series_info(series_id) {
+                if let Some(episodes) = info.get("episodes") {
+                    if let Some(obj) = episodes.as_object() {
+                        let mut seasons: Vec<i32> = obj.keys()
+                            .filter_map(|k| k.parse().ok())
+                            .collect();
+                        seasons.sort();
+                        let _ = ctx.sender.send(TaskResult::FavSeasonsLoaded(seasons));
+                        return;
+                    }
+                }
+                let _ = ctx.sender.send(TaskResult::Error("No seasons found".to_string()));
+            } else {
+                let _ = ctx.sender.send(TaskResult::Error("Failed to load series".to_string()));
+            }
+        });
+    }
+
+    fn fetch_fav_episodes(&mut self, series_id: i64, season: i32) {
+        self.loading = true;
+        self.status_message = "Loading episodes...".to_string();
+        
+        let ctx = self.fetch_context();
+
+        thread::spawn(move || {
+            let client = ctx.client();
+            
+            if let Ok(info) = client.get_series_info(series_id) {
+                if let Some(episodes) = info.get("episodes") {
+                    if let Some(season_eps) = episodes.get(&season.to_string()) {
+                        if let Some(arr) = season_eps.as_array() {
+                            let eps: Vec<Episode> = arr.iter().filter_map(|ep| {
+                                let id = ep.get("id")?.as_str()?.parse().ok()?;
+                                let title = ep.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string();
+                                let episode_num = ep.get("episode_num")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0) as i32;
+                                let container = ep.get("container_extension")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("mp4")
+                                    .to_string();
+                                
+                                Some(Episode {
+                                    id,
+                                    title,
+                                    episode_num,
+                                    season,
+                                    container_extension: container,
+                                })
+                            }).collect();
+                            
+                            let _ = ctx.sender.send(TaskResult::FavEpisodesLoaded(eps));
+                            return;
+                        }
+                    }
+                }
+                let _ = ctx.sender.send(TaskResult::Error("No episodes found".to_string()));
+            } else {
+                let _ = ctx.sender.send(TaskResult::Error("Failed to load episodes".to_string()));
+            }
+        });
+    }
+
     fn load_epg(&mut self) {
         let url = self.epg_url_input.trim().to_string();
         if url.is_empty() {
@@ -1257,6 +1389,9 @@ impl IPTVApp {
             series_id: channel.series_id,
             category_name,
             container_extension: channel.container_extension.clone(),
+            season_num: None,
+            episode_num: None,
+            series_name: None,
         }, reorder);
         
         // Use internal player if enabled OR if user typed "internal" in player field
@@ -1641,9 +1776,12 @@ impl IPTVApp {
     }
 
     fn play_episode(&mut self, episode: &Episode, series_id: i64) {
-        // Get series name from navigation
+        // Get series name from navigation or use generic name
         let series_name = self.navigation_stack.iter().find_map(|n| {
             if let NavigationLevel::Series(name) = n { Some(name.clone()) } else { None }
+        }).or_else(|| {
+            // Check if viewing from favorites
+            self.fav_viewing_series.as_ref().map(|(_, name)| name.clone())
         }).unwrap_or_else(|| "Series".to_string());
         
         let url = format!(
@@ -1851,6 +1989,18 @@ impl eframe::App for IPTVApp {
                     self.current_episodes = episodes;
                     self.loading = false;
                     self.status_message = format!("Loaded {} episodes", self.current_episodes.len());
+                }
+                TaskResult::FavSeasonsLoaded(seasons) => {
+                    self.log(&format!("[INFO] Loaded {} seasons for favorite", seasons.len()));
+                    self.fav_series_seasons = seasons;
+                    self.loading = false;
+                    self.status_message = format!("Loaded {} seasons", self.fav_series_seasons.len());
+                }
+                TaskResult::FavEpisodesLoaded(episodes) => {
+                    self.log(&format!("[INFO] Loaded {} episodes for favorite", episodes.len()));
+                    self.fav_series_episodes = episodes;
+                    self.loading = false;
+                    self.status_message = format!("Loaded {} episodes", self.fav_series_episodes.len());
                 }
                 TaskResult::Error(msg) => {
                     self.log(&format!("[ERROR] {}", msg));
@@ -2249,7 +2399,97 @@ impl eframe::App for IPTVApp {
                     ui.label("");
                     ui.add(egui::TextEdit::singleline(&mut self.search_query)
                         .hint_text("Search...")
-                        .desired_width(200.0));
+                        .desired_width(150.0));
+                    
+                    // Sort dropdown - show for Live, Movies, Series tabs
+                    match self.current_tab {
+                        Tab::Live => {
+                            let item_count = if !self.current_channels.is_empty() && 
+                               matches!(self.navigation_stack.last(), Some(NavigationLevel::Channels(_))) {
+                                self.current_channels.len()
+                            } else {
+                                self.live_categories.len()
+                            };
+                            if item_count > 0 {
+                                ui.separator();
+                                egui::ComboBox::from_id_salt("live_sort_top")
+                                    .selected_text(format!("{} {}", self.live_sort_order.icon(), self.live_sort_order.label()))
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_value(&mut self.live_sort_order, SortOrder::Default, "⇅ Default").changed() {
+                                            self.config.live_sort_order = self.live_sort_order;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.live_sort_order, SortOrder::NameAsc, "↑ Name A-Z").changed() {
+                                            self.config.live_sort_order = self.live_sort_order;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.live_sort_order, SortOrder::NameDesc, "↓ Name Z-A").changed() {
+                                            self.config.live_sort_order = self.live_sort_order;
+                                            self.config.save();
+                                        }
+                                    });
+                                ui.label(format!("({})", item_count));
+                            }
+                        }
+                        Tab::Movies => {
+                            let item_count = if !self.current_channels.is_empty() && 
+                               matches!(self.navigation_stack.last(), Some(NavigationLevel::Channels(_))) {
+                                self.current_channels.len()
+                            } else {
+                                self.movie_categories.len()
+                            };
+                            if item_count > 0 {
+                                ui.separator();
+                                egui::ComboBox::from_id_salt("movie_sort_top")
+                                    .selected_text(format!("{} {}", self.movie_sort_order.icon(), self.movie_sort_order.label()))
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_value(&mut self.movie_sort_order, SortOrder::Default, "⇅ Default").changed() {
+                                            self.config.movie_sort_order = self.movie_sort_order;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.movie_sort_order, SortOrder::NameAsc, "↑ Name A-Z").changed() {
+                                            self.config.movie_sort_order = self.movie_sort_order;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.movie_sort_order, SortOrder::NameDesc, "↓ Name Z-A").changed() {
+                                            self.config.movie_sort_order = self.movie_sort_order;
+                                            self.config.save();
+                                        }
+                                    });
+                                ui.label(format!("({})", item_count));
+                            }
+                        }
+                        Tab::Series => {
+                            let item_count = if !self.current_series.is_empty() {
+                                self.current_series.len()
+                            } else {
+                                self.series_categories.len()
+                            };
+                            // Only show when not viewing episodes/seasons
+                            let show_sort = self.current_episodes.is_empty() && self.current_seasons.is_empty() && item_count > 0;
+                            if show_sort {
+                                ui.separator();
+                                egui::ComboBox::from_id_salt("series_sort_top")
+                                    .selected_text(format!("{} {}", self.series_sort_order.icon(), self.series_sort_order.label()))
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_value(&mut self.series_sort_order, SortOrder::Default, "⇅ Default").changed() {
+                                            self.config.series_sort_order = self.series_sort_order;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.series_sort_order, SortOrder::NameAsc, "↑ Name A-Z").changed() {
+                                            self.config.series_sort_order = self.series_sort_order;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.series_sort_order, SortOrder::NameDesc, "↓ Name Z-A").changed() {
+                                            self.config.series_sort_order = self.series_sort_order;
+                                            self.config.save();
+                                        }
+                                    });
+                                ui.label(format!("({})", item_count));
+                            }
+                        }
+                        _ => {}
+                    }
                 });
                 ui.separator();
             }
@@ -2268,12 +2508,11 @@ impl eframe::App for IPTVApp {
                     .default_width(300.0)
                     .min_width(200.0)
                     .max_width(450.0)
-                    .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| {
                         // Restore scroll position if pending
                         let scroll_offset = self.pending_scroll_restore.take();
                         
-                        let mut scroll_area = egui::ScrollArea::vertical()
+                        let mut scroll_area = egui::ScrollArea::both()
                             .id_salt("channels_scroll")
                             .auto_shrink([false, false]);
                         
@@ -2282,7 +2521,6 @@ impl eframe::App for IPTVApp {
                         }
                         
                         let scroll_output = scroll_area.show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
                                 match self.current_tab {
                                     Tab::Live => self.show_live_tab(ui),
                                     Tab::Movies => self.show_movies_tab(ui),
@@ -2864,8 +3102,22 @@ impl IPTVApp {
                 String::new()
             };
             
-            // Clone channels to avoid borrow issues
-            let channels: Vec<_> = self.current_channels.clone();
+            // Clone and sort channels
+            let mut channels: Vec<_> = self.current_channels.clone();
+            
+            // Apply sort order based on stream type
+            let sort_order = match stream_type {
+                "live" => self.live_sort_order,
+                "movie" => self.movie_sort_order,
+                _ => SortOrder::Default,
+            };
+            
+            match sort_order {
+                SortOrder::NameAsc => channels.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortOrder::NameDesc => channels.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
+                SortOrder::Default => {} // Keep server order
+            }
+            
             let playlist_sources = self.playlist_sources.clone();
             let mut toggle_fav: Option<FavoriteItem> = None;
             let mut to_play: Option<Channel> = None;
@@ -2912,6 +3164,9 @@ impl IPTVApp {
                             series_id: None,
                             category_name: category_name.clone(),
                             container_extension: channel.container_extension.clone(),
+                            season_num: None,
+                            episode_num: None,
+                            series_name: None,
                         });
                     }
                     
@@ -2938,11 +3193,25 @@ impl IPTVApp {
             return;
         }
 
-        // Show categories
+        // Show categories (sorted)
         let search = self.search_query.to_lowercase();
         let mut clicked_category: Option<(String, String)> = None;
         
-        for cat in categories {
+        // Clone and sort categories
+        let mut sorted_categories: Vec<_> = categories.clone();
+        let sort_order = match stream_type {
+            "live" => self.live_sort_order,
+            "movie" => self.movie_sort_order,
+            _ => SortOrder::Default,
+        };
+        
+        match sort_order {
+            SortOrder::NameAsc => sorted_categories.sort_by(|a, b| a.category_name.to_lowercase().cmp(&b.category_name.to_lowercase())),
+            SortOrder::NameDesc => sorted_categories.sort_by(|a, b| b.category_name.to_lowercase().cmp(&a.category_name.to_lowercase())),
+            SortOrder::Default => {} // Keep server order
+        }
+        
+        for cat in &sorted_categories {
             let display_name = Self::sanitize_text(&cat.category_name);
             if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
                 continue;
@@ -3014,17 +3283,62 @@ impl IPTVApp {
 
         // Series list
         if !self.current_series.is_empty() {
-            let mut clicked_series: Option<i64> = None;
+            // Get category name for favorites
+            let category_name = self.navigation_stack.iter()
+                .find_map(|n| if let NavigationLevel::Series(name) = n { Some(name.clone()) } else { None })
+                .unwrap_or_default();
             
-            for series in &self.current_series {
+            // Clone and sort series
+            let mut series_list: Vec<_> = self.current_series.clone();
+            match self.series_sort_order {
+                SortOrder::NameAsc => series_list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortOrder::NameDesc => series_list.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
+                SortOrder::Default => {} // Keep server order
+            }
+            
+            let mut clicked_series: Option<i64> = None;
+            let mut toggle_fav: Option<FavoriteItem> = None;
+            
+            for series in &series_list {
                 let display_name = Self::sanitize_text(&series.name);
                 if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
                     continue;
                 }
                 
-                if ui.button(&display_name).clicked() {
-                    clicked_series = Some(series.series_id);
-                }
+                // Create a unique URL for series favorite (using series_id)
+                let series_url = format!("series://{}", series.series_id);
+                let is_fav = self.is_favorite(&series_url);
+                
+                ui.horizontal(|ui| {
+                    // Favorite star
+                    let fav_text = if is_fav { 
+                        egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)
+                    } else { 
+                        egui::RichText::new("☆").size(18.0).color(egui::Color32::GRAY)
+                    };
+                    if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                        toggle_fav = Some(FavoriteItem {
+                            name: series.name.clone(),
+                            url: series_url,
+                            stream_type: "series".to_string(),
+                            stream_id: None,
+                            series_id: Some(series.series_id),
+                            category_name: category_name.clone(),
+                            container_extension: None,
+                            season_num: None,
+                            episode_num: None,
+                            series_name: None,
+                        });
+                    }
+                    
+                    if ui.button(&display_name).clicked() {
+                        clicked_series = Some(series.series_id);
+                    }
+                });
+            }
+            
+            if let Some(fav) = toggle_fav {
+                self.toggle_favorite(fav);
             }
             
             if let Some(sid) = clicked_series {
@@ -3035,10 +3349,18 @@ impl IPTVApp {
             return;
         }
 
-        // Categories
+        // Categories (sorted)
         let mut clicked_category: Option<(String, String)> = None;
         
-        for cat in &self.series_categories {
+        // Clone and sort categories
+        let mut sorted_categories: Vec<_> = self.series_categories.clone();
+        match self.series_sort_order {
+            SortOrder::NameAsc => sorted_categories.sort_by(|a, b| a.category_name.to_lowercase().cmp(&b.category_name.to_lowercase())),
+            SortOrder::NameDesc => sorted_categories.sort_by(|a, b| b.category_name.to_lowercase().cmp(&a.category_name.to_lowercase())),
+            SortOrder::Default => {} // Keep server order
+        }
+        
+        for cat in &sorted_categories {
             let display_name = Self::sanitize_text(&cat.category_name);
             if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
                 continue;
@@ -3057,11 +3379,154 @@ impl IPTVApp {
     }
 
     fn show_favorites_tab(&mut self, ui: &mut egui::Ui) {
+        // Check if we're viewing a favorite series inline
+        if let Some((series_id, ref series_name)) = self.fav_viewing_series.clone() {
+            // Back button
+            ui.horizontal(|ui| {
+                if ui.button("⬅ Back").clicked() {
+                    self.fav_viewing_series = None;
+                    self.fav_series_seasons.clear();
+                    self.fav_series_episodes.clear();
+                    self.fav_viewing_season = None;
+                }
+                ui.label(egui::RichText::new(series_name.clone()).strong().size(16.0));
+            });
+            ui.separator();
+            
+            // Show episodes if viewing a season
+            if let Some(season) = self.fav_viewing_season {
+                ui.horizontal(|ui| {
+                    if ui.button("⬅ Seasons").clicked() {
+                        self.fav_viewing_season = None;
+                        self.fav_series_episodes.clear();
+                    }
+                    ui.label(format!("Season {}", season));
+                    
+                    // Favorite the season
+                    let season_url = format!("season://{}:{}", series_id, season);
+                    let is_season_fav = self.is_favorite(&season_url);
+                    let fav_text = if is_season_fav { 
+                        egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)
+                    } else { 
+                        egui::RichText::new("☆").size(18.0).color(egui::Color32::GRAY)
+                    };
+                    if ui.button(fav_text).on_hover_text(if is_season_fav { "Remove season from favorites" } else { "Add season to favorites" }).clicked() {
+                        self.toggle_favorite(FavoriteItem {
+                            name: format!("{} - Season {}", series_name, season),
+                            url: season_url,
+                            stream_type: "season".to_string(),
+                            stream_id: None,
+                            series_id: Some(series_id),
+                            category_name: series_name.clone(),
+                            container_extension: None,
+                            season_num: Some(season),
+                            episode_num: None,
+                            series_name: Some(series_name.clone()),
+                        });
+                    }
+                });
+                ui.separator();
+                
+                let episodes = self.fav_series_episodes.clone();
+                let mut to_play: Option<Episode> = None;
+                let mut toggle_ep_fav: Option<FavoriteItem> = None;
+                
+                for ep in &episodes {
+                    let ep_url = format!("episode://{}:{}:{}", series_id, season, ep.id);
+                    let is_ep_fav = self.is_favorite(&ep_url);
+                    
+                    ui.horizontal(|ui| {
+                        // Favorite star for episode
+                        let fav_text = if is_ep_fav { 
+                            egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)
+                        } else { 
+                            egui::RichText::new("☆").size(18.0).color(egui::Color32::GRAY)
+                        };
+                        if ui.button(fav_text).on_hover_text(if is_ep_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                            toggle_ep_fav = Some(FavoriteItem {
+                                name: format!("{} S{}E{}: {}", series_name, season, ep.episode_num, ep.title),
+                                url: ep_url,
+                                stream_type: "episode".to_string(),
+                                stream_id: Some(ep.id),
+                                series_id: Some(series_id),
+                                category_name: series_name.clone(),
+                                container_extension: Some(ep.container_extension.clone()),
+                                season_num: Some(season),
+                                episode_num: Some(ep.episode_num),
+                                series_name: Some(series_name.clone()),
+                            });
+                        }
+                        
+                        if ui.button("▶").clicked() {
+                            to_play = Some(ep.clone());
+                        }
+                        ui.label(format!("E{}: {}", ep.episode_num, Self::sanitize_text(&ep.title)));
+                    });
+                }
+                
+                if let Some(fav) = toggle_ep_fav {
+                    self.toggle_favorite(fav);
+                }
+                
+                if let Some(ep) = to_play {
+                    self.play_episode(&ep, series_id);
+                }
+                return;
+            }
+            
+            // Show seasons
+            let seasons = self.fav_series_seasons.clone();
+            let mut clicked_season: Option<i32> = None;
+            let mut toggle_season_fav: Option<FavoriteItem> = None;
+            
+            for season in &seasons {
+                let season_url = format!("season://{}:{}", series_id, season);
+                let is_season_fav = self.is_favorite(&season_url);
+                
+                ui.horizontal(|ui| {
+                    // Favorite star for season
+                    let fav_text = if is_season_fav { 
+                        egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)
+                    } else { 
+                        egui::RichText::new("☆").size(18.0).color(egui::Color32::GRAY)
+                    };
+                    if ui.button(fav_text).on_hover_text(if is_season_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                        toggle_season_fav = Some(FavoriteItem {
+                            name: format!("{} - Season {}", series_name, season),
+                            url: season_url,
+                            stream_type: "season".to_string(),
+                            stream_id: None,
+                            series_id: Some(series_id),
+                            category_name: series_name.clone(),
+                            container_extension: None,
+                            season_num: Some(*season),
+                            episode_num: None,
+                            series_name: Some(series_name.clone()),
+                        });
+                    }
+                    
+                    if ui.button(format!("Season {}", season)).clicked() {
+                        clicked_season = Some(*season);
+                    }
+                });
+            }
+            
+            if let Some(fav) = toggle_season_fav {
+                self.toggle_favorite(fav);
+            }
+            
+            if let Some(s) = clicked_season {
+                self.fav_viewing_season = Some(s);
+                self.fetch_fav_episodes(series_id, s);
+            }
+            return;
+        }
+        
         if self.favorites.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(50.0);
                 ui.heading("No favorites yet");
-                ui.label("Click ☆ next to any channel or movie to add it to favorites");
+                ui.label("Click ☆ next to any channel, movie, series, season, or episode");
             });
             return;
         }
@@ -3079,12 +3544,22 @@ impl IPTVApp {
             .filter(|f| f.stream_type == "series")
             .cloned()
             .collect();
+        let season_favs: Vec<_> = self.favorites.iter()
+            .filter(|f| f.stream_type == "season")
+            .cloned()
+            .collect();
+        let episode_favs: Vec<_> = self.favorites.iter()
+            .filter(|f| f.stream_type == "episode")
+            .cloned()
+            .collect();
         
         let mut to_remove: Option<String> = None;
         let mut to_play: Option<FavoriteItem> = None;
+        let mut to_view_series: Option<(i64, String)> = None;
+        let mut to_view_season: Option<(i64, i32, String)> = None; // series_id, season, series_name
         
         if !live_favs.is_empty() {
-            egui::CollapsingHeader::new(format!("Live Channels ({})", live_favs.len()))
+            egui::CollapsingHeader::new(format!("📡 Live Channels ({})", live_favs.len()))
                 .default_open(true)
                 .show(ui, |ui| {
                     for fav in &live_favs {
@@ -3104,7 +3579,7 @@ impl IPTVApp {
         }
         
         if !movie_favs.is_empty() {
-            egui::CollapsingHeader::new(format!("Movies ({})", movie_favs.len()))
+            egui::CollapsingHeader::new(format!("🎬 Movies ({})", movie_favs.len()))
                 .default_open(true)
                 .show(ui, |ui| {
                     for fav in &movie_favs {
@@ -3123,7 +3598,7 @@ impl IPTVApp {
         }
         
         if !series_favs.is_empty() {
-            egui::CollapsingHeader::new(format!("Series ({})", series_favs.len()))
+            egui::CollapsingHeader::new(format!("📺 Series ({})", series_favs.len()))
                 .default_open(true)
                 .show(ui, |ui| {
                     for fav in &series_favs {
@@ -3131,8 +3606,10 @@ impl IPTVApp {
                             if ui.button(egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)).on_hover_text("Remove from favorites").clicked() {
                                 to_remove = Some(fav.url.clone());
                             }
-                            if ui.button("▶").clicked() {
-                                to_play = Some(fav.clone());
+                            if ui.button("📺").on_hover_text("View seasons").clicked() {
+                                if let Some(series_id) = fav.series_id {
+                                    to_view_series = Some((series_id, fav.name.clone()));
+                                }
                             }
                             ui.label(Self::sanitize_text(&fav.name));
                             ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
@@ -3141,7 +3618,64 @@ impl IPTVApp {
                 });
         }
         
-        // Handle play action
+        if !season_favs.is_empty() {
+            egui::CollapsingHeader::new(format!("📂 Seasons ({})", season_favs.len()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for fav in &season_favs {
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)).on_hover_text("Remove from favorites").clicked() {
+                                to_remove = Some(fav.url.clone());
+                            }
+                            if ui.button("📂").on_hover_text("View episodes").clicked() {
+                                if let (Some(series_id), Some(season)) = (fav.series_id, fav.season_num) {
+                                    let series_name = fav.series_name.clone().unwrap_or_else(|| fav.category_name.clone());
+                                    to_view_season = Some((series_id, season, series_name));
+                                }
+                            }
+                            ui.label(Self::sanitize_text(&fav.name));
+                        });
+                    }
+                });
+        }
+        
+        if !episode_favs.is_empty() {
+            egui::CollapsingHeader::new(format!("🎞 Episodes ({})", episode_favs.len()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for fav in &episode_favs {
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)).on_hover_text("Remove from favorites").clicked() {
+                                to_remove = Some(fav.url.clone());
+                            }
+                            if ui.button("▶").clicked() {
+                                to_play = Some(fav.clone());
+                            }
+                            ui.label(Self::sanitize_text(&fav.name));
+                        });
+                    }
+                });
+        }
+        
+        // Handle view season action (stay in favorites)
+        if let Some((series_id, season, series_name)) = to_view_season {
+            self.fav_viewing_series = Some((series_id, series_name));
+            self.fav_viewing_season = Some(season);
+            self.fav_series_seasons.clear();
+            self.fav_series_episodes.clear();
+            self.fetch_fav_episodes(series_id, season);
+        }
+        
+        // Handle view series action (stay in favorites)
+        if let Some((series_id, name)) = to_view_series {
+            self.fav_viewing_series = Some((series_id, name));
+            self.fav_series_seasons.clear();
+            self.fav_series_episodes.clear();
+            self.fav_viewing_season = None;
+            self.fetch_fav_series_info(series_id);
+        }
+        
+        // Handle play action (for live/movies/episodes - all play directly)
         if let Some(fav) = to_play {
             self.play_favorite(&fav);
         }
