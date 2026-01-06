@@ -464,6 +464,8 @@ struct IPTVApp {
     epg_last_ui_refresh: i64,
     epg_show_actual_time: bool, // false = offset mode (Now, +30m), true = actual time (8:00 PM)
     selected_epg_channel: Option<String>,
+    // Auto-update throttling (check once per minute instead of every frame)
+    last_auto_update_check: i64,
 }
 
 impl Default for IPTVApp {
@@ -634,6 +636,7 @@ impl IPTVApp {
             epg_last_ui_refresh: 0,
             epg_show_actual_time: epg_show_actual_time,
             selected_epg_channel: None,
+            last_auto_update_check: 0,
         }
     }
     
@@ -2649,61 +2652,65 @@ impl eframe::App for IPTVApp {
         }
         
         // === Auto-update checks (EPG and Playlist) ===
-        // Share timestamp to avoid duplicate syscalls
+        // Throttle to once per minute - no need to check "has 4 hours passed?" 60 times/second
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         
-        // EPG auto-update check (periodic refresh) - only when logged in and interval elapsed
-        if self.logged_in && !self.epg_loading && !self.epg_url_input.is_empty() {
-            if let Some(interval_secs) = self.epg_auto_update.as_secs() {
-                // Get persistent epg_last_updated from playlist entry if available
-                let persistent_last_update = self.playlist_entries.iter().find(|e| {
-                    matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
-                        if server == &self.server && username == &self.username)
-                }).map(|e| e.epg_last_updated).unwrap_or(0);
-                
-                // Use in-memory timestamp if set, otherwise use persistent
-                let last_update = self.epg_last_update.unwrap_or(persistent_last_update);
-                
-                // Only update if interval has elapsed (last_update > 0 means it was loaded before)
-                if last_update > 0 && (now - last_update) >= interval_secs {
-                    self.log("[INFO] EPG auto-update triggered");
-                    self.load_epg();
+        if (now - self.last_auto_update_check) >= 60 {
+            self.last_auto_update_check = now;
+            
+            // EPG auto-update check (periodic refresh) - only when logged in and interval elapsed
+            if self.logged_in && !self.epg_loading && !self.epg_url_input.is_empty() {
+                if let Some(interval_secs) = self.epg_auto_update.as_secs() {
+                    // Get persistent epg_last_updated from playlist entry if available
+                    let persistent_last_update = self.playlist_entries.iter().find(|e| {
+                        matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                            if server == &self.server && username == &self.username)
+                    }).map(|e| e.epg_last_updated).unwrap_or(0);
+                    
+                    // Use in-memory timestamp if set, otherwise use persistent
+                    let last_update = self.epg_last_update.unwrap_or(persistent_last_update);
+                    
+                    // Only update if interval has elapsed (last_update > 0 means it was loaded before)
+                    if last_update > 0 && (now - last_update) >= interval_secs {
+                        self.log("[INFO] EPG auto-update triggered");
+                        self.load_epg();
+                    }
                 }
             }
-        }
-        
-        // Playlist auto-update check (periodic refresh for M3U playlists)
-        // Skip if loading/EPG loading, and add 30min stagger after EPG updates
-        if !self.loading && !self.epg_loading {
-            // 30 minute stagger after EPG update to avoid simultaneous requests
-            let stagger_ok = self.epg_last_update.map_or(true, |epg_last| (now - epg_last) >= 1800);
             
-            if stagger_ok {
-                // Find first M3U playlist that needs updating
-                let playlist_to_update = self.playlist_entries.iter().enumerate()
-                    .filter(|(_, e)| e.enabled && e.auto_update_days > 0)
-                    .filter_map(|(i, entry)| {
-                        if let PlaylistType::M3U { url } = &entry.entry_type {
-                            // Check if loaded and interval elapsed
-                            let is_loaded = self.playlist_sources.iter().any(|(_, name)| name == &entry.name);
-                            let interval_secs = (entry.auto_update_days as i64) * 24 * 60 * 60;
-                            if is_loaded && entry.last_updated > 0 && (now - entry.last_updated) >= interval_secs {
-                                return Some((i, url.clone(), entry.name.clone()));
-                            }
-                        }
-                        None
-                    })
-                    .next();
+            // Playlist auto-update check (periodic refresh for M3U playlists)
+            // Skip if loading/EPG loading, and add 30min stagger after EPG updates
+            if !self.loading && !self.epg_loading {
+                // 30 minute stagger after EPG update to avoid simultaneous requests
+                let stagger_ok = self.epg_last_update.map_or(true, |epg_last| (now - epg_last) >= 1800);
                 
-                // Trigger background update
-                if let Some((idx, url, name)) = playlist_to_update {
-                    self.log(&format!("[INFO] Playlist auto-update triggered for '{}'", name));
-                    self.playlist_entries[idx].last_updated = now;
-                    save_playlist_entries(&self.playlist_entries);
-                    self.reload_playlist(&url, &name);
+                if stagger_ok {
+                    // Find first M3U playlist that needs updating
+                    let playlist_to_update = self.playlist_entries.iter().enumerate()
+                        .filter(|(_, e)| e.enabled && e.auto_update_days > 0)
+                        .filter_map(|(i, entry)| {
+                            if let PlaylistType::M3U { url } = &entry.entry_type {
+                                // Check if loaded and interval elapsed
+                                let is_loaded = self.playlist_sources.iter().any(|(_, name)| name == &entry.name);
+                                let interval_secs = (entry.auto_update_days as i64) * 24 * 60 * 60;
+                                if is_loaded && entry.last_updated > 0 && (now - entry.last_updated) >= interval_secs {
+                                    return Some((i, url.clone(), entry.name.clone()));
+                                }
+                            }
+                            None
+                        })
+                        .next();
+                    
+                    // Trigger background update
+                    if let Some((idx, url, name)) = playlist_to_update {
+                        self.log(&format!("[INFO] Playlist auto-update triggered for '{}'", name));
+                        self.playlist_entries[idx].last_updated = now;
+                        save_playlist_entries(&self.playlist_entries);
+                        self.reload_playlist(&url, &name);
+                    }
                 }
             }
         }
