@@ -686,6 +686,36 @@ impl IPTVApp {
         self.current_playlist_idx = None;
     }
     
+    /// Create an Xtream PlaylistEntry from current app state
+    fn create_xtream_entry_from_state(&self) -> PlaylistEntry {
+        let now = unix_timestamp();
+        PlaylistEntry {
+            name: format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server)),
+            entry_type: PlaylistType::Xtream {
+                server: self.server.clone(),
+                username: self.username.clone(),
+                password: self.password.clone(),
+            },
+            saved_at: now,
+            enabled: true,
+            auto_login: false,
+            auto_update_days: 0,
+            last_updated: now,
+            epg_url: self.epg_url_input.clone(),
+            epg_time_offset: self.epg_time_offset,
+            epg_auto_update_index: self.epg_auto_update.to_index(),
+            epg_show_actual_time: self.epg_show_actual_time,
+            epg_last_updated: 0,
+            external_player: self.external_player.clone(),
+            buffer_seconds: self.buffer_seconds,
+            connection_quality: self.connection_quality,
+            selected_user_agent: self.selected_user_agent,
+            custom_user_agent: self.custom_user_agent.clone(),
+            use_custom_user_agent: self.use_custom_user_agent,
+            pass_user_agent_to_player: self.pass_user_agent_to_player,
+        }
+    }
+    
     fn save_current_state(&mut self) {
         self.config.save_state = self.save_state;
         self.config.auto_login = self.auto_login;
@@ -716,34 +746,8 @@ impl IPTVApp {
             
             // Also save to playlist_entries if this is an Xtream server
             if !self.server.is_empty() && !self.username.is_empty() {
-                let now = unix_timestamp();
-                
-                // Create playlist entry with all current settings
-                let entry = PlaylistEntry {
-                    name: format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server)),
-                    entry_type: PlaylistType::Xtream {
-                        server: self.server.clone(),
-                        username: self.username.clone(),
-                        password: self.password.clone(),
-                    },
-                    saved_at: now,
-                    enabled: true,
-                    auto_login: self.auto_login,
-                    auto_update_days: 0,
-                    last_updated: now,
-                    epg_url: self.epg_url_input.clone(),
-                    epg_time_offset: self.epg_time_offset,
-                    epg_auto_update_index: self.epg_auto_update.to_index(),
-                    epg_show_actual_time: self.epg_show_actual_time,
-                    epg_last_updated: 0,
-                    external_player: self.external_player.clone(),
-                    buffer_seconds: self.buffer_seconds,
-                    connection_quality: self.connection_quality,
-                    selected_user_agent: self.selected_user_agent,
-                    custom_user_agent: self.custom_user_agent.clone(),
-                    use_custom_user_agent: self.use_custom_user_agent,
-                    pass_user_agent_to_player: self.pass_user_agent_to_player,
-                };
+                let mut entry = self.create_xtream_entry_from_state();
+                entry.auto_login = self.auto_login; // Preserve current auto_login setting
                 
                 // Update existing entry or add new one (match by server+username)
                 if let Some(existing) = self.playlist_entries.iter_mut().find(|e| {
@@ -2307,33 +2311,7 @@ impl eframe::App for IPTVApp {
                     
                     // Auto-save to playlist_entries if save_state is enabled
                     if self.save_state && !self.server.is_empty() && !self.username.is_empty() {
-                        let now = unix_timestamp();
-                        
-                        let entry = PlaylistEntry {
-                            name: format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server)),
-                            entry_type: PlaylistType::Xtream {
-                                server: self.server.clone(),
-                                username: self.username.clone(),
-                                password: self.password.clone(),
-                            },
-                            saved_at: now,
-                            enabled: true,
-                            auto_login: false, // Default off for new entries
-                            auto_update_days: 0,
-                            last_updated: now,
-                            epg_url: self.epg_url_input.clone(),
-                            epg_time_offset: self.epg_time_offset,
-                            epg_auto_update_index: self.epg_auto_update.to_index(),
-                            epg_show_actual_time: self.epg_show_actual_time,
-                            epg_last_updated: 0,
-                            external_player: self.external_player.clone(),
-                            buffer_seconds: self.buffer_seconds,
-                            connection_quality: self.connection_quality,
-                            selected_user_agent: self.selected_user_agent,
-                            custom_user_agent: self.custom_user_agent.clone(),
-                            use_custom_user_agent: self.use_custom_user_agent,
-                            pass_user_agent_to_player: self.pass_user_agent_to_player,
-                        };
+                        let entry = self.create_xtream_entry_from_state();
                         
                         // Update existing or add new
                         if let Some(existing) = self.playlist_entries.iter_mut().find(|e| {
@@ -3255,29 +3233,7 @@ impl eframe::App for IPTVApp {
                                     self.playlist_name_input.clone()
                                 };
                                 
-                                let now = unix_timestamp();
-                                
-                                let entry = PlaylistEntry {
-                                    name: name.clone(),
-                                    entry_type: PlaylistType::M3U { url: self.playlist_url_input.clone() },
-                                    saved_at: now,
-                                    enabled: true,
-                                    auto_login: false,
-                                    auto_update_days: 0,
-                                    last_updated: now,
-                                    epg_url: String::new(),
-                                    epg_time_offset: 0.0,
-                                    epg_auto_update_index: 3,
-                                    epg_show_actual_time: false,
-                                    epg_last_updated: 0,
-                                    external_player: String::new(),
-                                    buffer_seconds: 5,
-                                    connection_quality: ConnectionQuality::Normal,
-                                    selected_user_agent: 0,
-                                    custom_user_agent: String::new(),
-                                    use_custom_user_agent: false,
-                                    pass_user_agent_to_player: true,
-                                };
+                                let entry = PlaylistEntry::new_m3u(name.clone(), self.playlist_url_input.clone());
                                 
                                 // Add if not duplicate
                                 if !self.playlist_entries.iter().any(|e| {
@@ -3304,36 +3260,14 @@ impl eframe::App for IPTVApp {
                                         self.playlist_name_input.clone()
                                     };
                                     
-                                    let now = unix_timestamp();
-                                    
-                                    let entry = PlaylistEntry {
-                                        name: name.clone(),
-                                        entry_type: PlaylistType::Xtream { server, username, password },
-                                        saved_at: now,
-                                        enabled: true,
-                                        auto_login: false,
-                                        auto_update_days: 0,
-                                        last_updated: now,
-                                        epg_url: String::new(),
-                                        epg_time_offset: 0.0,
-                                        epg_auto_update_index: 3,
-                                        epg_show_actual_time: false,
-                                        epg_last_updated: 0,
-                                        external_player: String::new(),
-                                        buffer_seconds: 5,
-                                        connection_quality: ConnectionQuality::Normal,
-                                        selected_user_agent: 0,
-                                        custom_user_agent: String::new(),
-                                        use_custom_user_agent: false,
-                                        pass_user_agent_to_player: true,
-                                    };
-                                    
-                                    // Add if not duplicate
-                                    if !self.playlist_entries.iter().any(|e| {
+                                    // Check for duplicate before creating entry
+                                    let is_duplicate = self.playlist_entries.iter().any(|e| {
                                         matches!(&e.entry_type, PlaylistType::Xtream { server: s, username: u, .. } 
-                                            if matches!(&entry.entry_type, PlaylistType::Xtream { server: s2, username: u2, .. } 
-                                                if s == s2 && u == u2))
-                                    }) {
+                                            if s == &server && u == &username)
+                                    });
+                                    
+                                    if !is_duplicate {
+                                        let entry = PlaylistEntry::new_xtream(name.clone(), server, username, password);
                                         self.playlist_entries.push(entry);
                                         save_playlist_entries(&self.playlist_entries);
                                         self.status_message = format!("Added Xtream '{}'", name);
@@ -3350,13 +3284,11 @@ impl eframe::App for IPTVApp {
                         // Save current Xtream session
                         if !self.server.is_empty() && self.logged_in {
                             if ui.button("💾 Save Current").on_hover_text("Save current Xtream session with all settings").clicked() {
-                                let name = if self.playlist_name_input.is_empty() {
-                                    format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server))
+                                let custom_name = if self.playlist_name_input.is_empty() {
+                                    None
                                 } else {
-                                    self.playlist_name_input.clone()
+                                    Some(self.playlist_name_input.clone())
                                 };
-                                
-                                let now = unix_timestamp();
                                 
                                 // Check if entry exists to preserve auto_login, enabled, and auto_update settings
                                 let existing_entry = self.playlist_entries.iter().find(|e| {
@@ -3366,34 +3298,21 @@ impl eframe::App for IPTVApp {
                                 let existing_auto_login = existing_entry.map(|e| e.auto_login).unwrap_or(false);
                                 let existing_enabled = existing_entry.map(|e| e.enabled).unwrap_or(true);
                                 let existing_auto_update_days = existing_entry.map(|e| e.auto_update_days).unwrap_or(0);
-                                let existing_last_updated = existing_entry.map(|e| e.last_updated).unwrap_or(now);
+                                let existing_last_updated = existing_entry.map(|e| e.last_updated).unwrap_or_else(unix_timestamp);
                                 let existing_epg_last_updated = existing_entry.map(|e| e.epg_last_updated).unwrap_or(0);
                                 
-                                let entry = PlaylistEntry {
-                                    name: name.clone(),
-                                    entry_type: PlaylistType::Xtream {
-                                        server: self.server.clone(),
-                                        username: self.username.clone(),
-                                        password: self.password.clone(),
-                                    },
-                                    saved_at: now,
-                                    enabled: existing_enabled,
-                                    auto_login: existing_auto_login,
-                                    auto_update_days: existing_auto_update_days,
-                                    last_updated: existing_last_updated,
-                                    epg_url: self.epg_url_input.clone(),
-                                    epg_time_offset: self.epg_time_offset,
-                                    epg_auto_update_index: self.epg_auto_update.to_index(),
-                                    epg_show_actual_time: self.epg_show_actual_time,
-                                    epg_last_updated: existing_epg_last_updated,
-                                    external_player: self.external_player.clone(),
-                                    buffer_seconds: self.buffer_seconds,
-                                    connection_quality: self.connection_quality,
-                                    selected_user_agent: self.selected_user_agent,
-                                    custom_user_agent: self.custom_user_agent.clone(),
-                                    use_custom_user_agent: self.use_custom_user_agent,
-                                    pass_user_agent_to_player: self.pass_user_agent_to_player,
-                                };
+                                // Create entry from current state, then apply preserved settings
+                                let mut entry = self.create_xtream_entry_from_state();
+                                if let Some(name) = custom_name {
+                                    entry.name = name;
+                                }
+                                entry.enabled = existing_enabled;
+                                entry.auto_login = existing_auto_login;
+                                entry.auto_update_days = existing_auto_update_days;
+                                entry.last_updated = existing_last_updated;
+                                entry.epg_last_updated = existing_epg_last_updated;
+                                
+                                let saved_name = entry.name.clone();
                                 
                                 // Update existing or add new
                                 if let Some(existing) = self.playlist_entries.iter_mut().find(|e| {
@@ -3405,7 +3324,7 @@ impl eframe::App for IPTVApp {
                                     self.playlist_entries.push(entry);
                                 }
                                 save_playlist_entries(&self.playlist_entries);
-                                self.status_message = format!("Saved '{}'", name);
+                                self.status_message = format!("Saved '{}'", saved_name);
                                 self.playlist_name_input.clear();
                             }
                         }

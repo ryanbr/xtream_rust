@@ -287,6 +287,68 @@ pub enum PlaylistType {
     },
 }
 
+impl PlaylistEntry {
+    /// Create a new M3U playlist entry with default settings
+    pub fn new_m3u(name: String, url: String) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        
+        Self {
+            name,
+            entry_type: PlaylistType::M3U { url },
+            saved_at: now,
+            enabled: true,
+            auto_login: false,
+            auto_update_days: 0,
+            last_updated: now,
+            epg_url: String::new(),
+            epg_time_offset: 0.0,
+            epg_auto_update_index: 3, // default_epg_auto_update
+            epg_show_actual_time: false,
+            epg_last_updated: 0,
+            external_player: String::new(),
+            buffer_seconds: 5, // default_buffer
+            connection_quality: ConnectionQuality::Normal,
+            selected_user_agent: 0,
+            custom_user_agent: String::new(),
+            use_custom_user_agent: false,
+            pass_user_agent_to_player: true,
+        }
+    }
+    
+    /// Create a new Xtream playlist entry with default settings
+    pub fn new_xtream(name: String, server: String, username: String, password: String) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        
+        Self {
+            name,
+            entry_type: PlaylistType::Xtream { server, username, password },
+            saved_at: now,
+            enabled: true,
+            auto_login: false,
+            auto_update_days: 0,
+            last_updated: now,
+            epg_url: String::new(),
+            epg_time_offset: 0.0,
+            epg_auto_update_index: 3, // default_epg_auto_update
+            epg_show_actual_time: false,
+            epg_last_updated: 0,
+            external_player: String::new(),
+            buffer_seconds: 5, // default_buffer
+            connection_quality: ConnectionQuality::Normal,
+            selected_user_agent: 0,
+            custom_user_agent: String::new(),
+            use_custom_user_agent: false,
+            pass_user_agent_to_player: true,
+        }
+    }
+}
+
 fn playlist_manager_path() -> PathBuf {
     let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("xtreme_iptv");
