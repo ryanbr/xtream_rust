@@ -2788,7 +2788,7 @@ impl eframe::App for IPTVApp {
                 
                 // Logout button when logged in
                 if self.logged_in {
-                    if ui.button("🚪 Logout").clicked() {
+                    if ui.button("🚪 Logout").on_hover_text("Disconnect from current server").clicked() {
                         self.logged_in = false;
                         self.live_categories.clear();
                         self.movie_categories.clear();
@@ -2802,7 +2802,7 @@ impl eframe::App for IPTVApp {
                 
                 ui.separator();
                 
-                if ui.button("🌐 User Agent").clicked() {
+                if ui.button("🌐 User Agent").on_hover_text("Configure User Agent string sent to server").clicked() {
                     self.show_user_agent_dialog = true;
                 }
                 
@@ -2926,7 +2926,7 @@ impl eframe::App for IPTVApp {
                         ui.selectable_value(&mut self.connection_quality, ConnectionQuality::Slow, "🐢 Slow (15s)");
                         ui.selectable_value(&mut self.connection_quality, ConnectionQuality::VerySlow, "🦥 Very Slow (30s)");
                         ui.selectable_value(&mut self.connection_quality, ConnectionQuality::Custom, "⚙️ Custom");
-                    });
+                    }).response.on_hover_text("Buffer size for streaming - increase for slow connections");
                 
                 if self.connection_quality == ConnectionQuality::Custom {
                     ui.label("Buffer:");
@@ -3558,7 +3558,7 @@ impl eframe::App for IPTVApp {
                                                     if ui.selectable_label(entry.auto_update_days == 5, "5 days").clicked() {
                                                         to_change_auto_update = Some((i, 5));
                                                     }
-                                                });
+                                                }).response.on_hover_text("Auto-update interval - automatically refresh playlist data");
                                         }
                                         
                                         // Saved date
