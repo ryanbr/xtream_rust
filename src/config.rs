@@ -241,6 +241,11 @@ pub struct PlaylistEntry {
     // Auto-login on startup
     #[serde(default)]
     pub auto_login: bool,
+    // Playlist auto-update settings (0=Off, 1=1day, 2=2days, etc.)
+    #[serde(default)]
+    pub auto_update_days: u8,
+    #[serde(default)]
+    pub last_updated: i64,
     // EPG settings
     #[serde(default)]
     pub epg_url: String,
@@ -250,6 +255,8 @@ pub struct PlaylistEntry {
     pub epg_auto_update_index: u8,
     #[serde(default)]
     pub epg_show_actual_time: bool,
+    #[serde(default)]
+    pub epg_last_updated: i64,
     // Player settings
     #[serde(default)]
     pub external_player: String,
@@ -336,4 +343,35 @@ pub fn save_address_book(book: &[SavedCredential]) {
     if let Ok(content) = serde_json::to_string_pretty(book) {
         let _ = fs::write(path, content);
     }
+}
+
+fn epg_cache_path(server: &str, username: &str) -> PathBuf {
+    let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push("xtreme_iptv");
+    path.push("epg_cache");
+    fs::create_dir_all(&path).ok();
+    // Create filename from server+username hash to avoid path issues
+    let key = format!("{}_{}", username, server.replace(['/', ':', '.'], "_"));
+    path.push(format!("{}.json", key));
+    path
+}
+
+pub fn save_epg_cache<T: serde::Serialize>(server: &str, username: &str, data: &T) {
+    let path = epg_cache_path(server, username);
+    // Use non-pretty JSON for smaller file size (EPG can be large)
+    if let Ok(content) = serde_json::to_string(data) {
+        let _ = fs::write(path, content);
+    }
+}
+
+pub fn load_epg_cache<T: serde::de::DeserializeOwned>(server: &str, username: &str) -> Option<T> {
+    let path = epg_cache_path(server, username);
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str(&content) {
+                return Some(data);
+            }
+        }
+    }
+    None
 }

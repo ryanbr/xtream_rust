@@ -1,15 +1,13 @@
 //! EPG (Electronic Program Guide) Parser
 //! Fast streaming parser for XMLTV format - handles 100MB+ files efficiently
-//! Supports both plain XML and gzip-compressed (.xml.gz) files
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::collections::HashMap;
-use std::io::{BufRead, Read};
-use flate2::read::GzDecoder;
+use std::io::BufRead;
 
 /// A single TV program/show
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     /// Channel ID this program belongs to
     pub channel_id: String,
@@ -30,7 +28,7 @@ pub struct Program {
 }
 
 /// Channel information from EPG
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EpgChannel {
     /// Channel ID (matches epg_channel_id in streams)
     pub id: String,
@@ -41,7 +39,7 @@ pub struct EpgChannel {
 }
 
 /// Parsed EPG data
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EpgData {
     /// Channel information indexed by channel ID
     pub channels: HashMap<String, EpgChannel>,
@@ -59,40 +57,30 @@ impl EpgData {
         Self::default()
     }
 
-    /// Get current program for a channel (uses binary search)
+    /// Get current program for a channel
     pub fn current_program(&self, channel_id: &str) -> Option<&Program> {
         let now = current_timestamp();
-        let programs = self.programs.get(channel_id)?;
-        
-        // Binary search: find first program that ends after now
-        let idx = programs.partition_point(|p| p.stop <= now);
-        programs.get(idx).filter(|p| p.start <= now)
+        self.programs
+            .get(channel_id)?
+            .iter()
+            .find(|p| p.start <= now && p.stop > now)
     }
 
-    /// Get next program for a channel (uses binary search)
+    /// Get next program for a channel
     pub fn next_program(&self, channel_id: &str) -> Option<&Program> {
         let now = current_timestamp();
-        let programs = self.programs.get(channel_id)?;
-        
-        // Binary search: find first program that starts after now
-        let idx = programs.partition_point(|p| p.start <= now);
-        programs.get(idx)
+        self.programs
+            .get(channel_id)?
+            .iter()
+            .find(|p| p.start > now)
     }
 
-    /// Get programs for a channel within a time range (uses binary search)
+    /// Get programs for a channel within a time range
     pub fn programs_in_range(&self, channel_id: &str, start: i64, end: i64) -> Vec<&Program> {
-        let Some(programs) = self.programs.get(channel_id) else {
-            return Vec::new();
-        };
-        
-        // Binary search: find first program that ends after start
-        let start_idx = programs.partition_point(|p| p.stop <= start);
-        
-        // Collect programs until we pass the end time
-        programs[start_idx..]
-            .iter()
-            .take_while(|p| p.start < end)
-            .collect()
+        self.programs
+            .get(channel_id)
+            .map(|progs| progs.iter().filter(|p| p.stop > start && p.start < end).collect())
+            .unwrap_or_default()
     }
 
     /// Get all programs for today for a channel
@@ -358,31 +346,11 @@ impl EpgParser {
     }
 
     /// Parse EPG from file path - streams from disk
-    /// Parse EPG from file - auto-detects gzip compression
     pub fn parse_file(path: &str) -> Result<EpgData, String> {
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
-        
-        // Read first 2 bytes to check for gzip magic number (1f 8b)
-        let mut magic = [0u8; 2];
-        reader.read_exact(&mut magic).map_err(|e| e.to_string())?;
-        
-        // Seek back to start
-        use std::io::Seek;
-        reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-        
-        // Check for gzip magic bytes
-        if magic[0] == 0x1f && magic[1] == 0x8b {
-            // Gzip compressed - decompress first
-            let decoder = GzDecoder::new(reader);
-            let buf_reader = std::io::BufReader::with_capacity(64 * 1024, decoder);
-            let sanitizing_reader = SanitizingBufReader::new(buf_reader);
-            Self::parse_reader(sanitizing_reader)
-        } else {
-            // Plain XML
-            let sanitizing_reader = SanitizingBufReader::new(reader);
-            Self::parse_reader(sanitizing_reader)
-        }
+        let reader = std::io::BufReader::with_capacity(64 * 1024, file);
+        let sanitizing_reader = SanitizingBufReader::new(reader);
+        Self::parse_reader(sanitizing_reader)
     }
 }
 
@@ -505,13 +473,7 @@ impl<R: std::io::Read> std::io::BufRead for SanitizingBufReader<R> {
 }
 
 /// Decode XML entities back to normal characters
-/// Returns the original string if no entities found (avoids allocation)
 fn decode_xml_entities(s: &str) -> String {
-    // Fast path: if no & found, return as-is
-    if !s.contains('&') {
-        return s.to_string();
-    }
-    
     let mut result = s.to_string();
     
     // Decode named entities
@@ -680,27 +642,15 @@ impl Default for DownloadConfig {
     }
 }
 
-/// Download progress callback: (downloaded_bytes, total_bytes)
+/// Download progress callback
 pub type ProgressCallback = Box<dyn Fn(u64, Option<u64>) + Send>;
 
-/// EPG Downloader with HTTPS support
+/// EPG Downloader with retry and resume support
 pub struct EpgDownloader;
 
 impl EpgDownloader {
-    /// Create a configured ureq agent
-    fn create_agent(config: &DownloadConfig) -> ureq::Agent {
-        use std::time::Duration;
-        
-        ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(config.read_timeout_secs)))
-            .timeout_connect(Some(Duration::from_secs(config.connect_timeout_secs)))
-            .max_idle_connections(4)
-            .max_idle_connections_per_host(2)
-            .build()
-            .new_agent()
-    }
-
-    /// Download EPG to file with retry support (supports HTTP and HTTPS)
+    /// Download EPG to file with retry support
+    /// Returns the path to the downloaded file
     pub fn download_to_file(
         url: &str,
         output_path: &str,
@@ -709,13 +659,18 @@ impl EpgDownloader {
     ) -> Result<String, String> {
         use std::time::Duration;
 
-        let agent = Self::create_agent(config);
         let mut attempts = 0;
+        let mut downloaded_bytes: u64 = 0;
+
+        // Check if partial file exists for resume
+        if let Ok(metadata) = std::fs::metadata(output_path) {
+            downloaded_bytes = metadata.len();
+        }
 
         loop {
             attempts += 1;
-
-            match Self::try_download(&agent, url, output_path, config, &progress) {
+            
+            match Self::try_download(url, output_path, downloaded_bytes, config, &progress) {
                 Ok(total) => {
                     if let Some(ref cb) = progress {
                         cb(total, Some(total));
@@ -726,7 +681,12 @@ impl EpgDownloader {
                     if attempts >= config.max_retries {
                         return Err(format!("Download failed after {} attempts: {}", attempts, e));
                     }
-
+                    
+                    // Update downloaded bytes for resume
+                    if let Ok(metadata) = std::fs::metadata(output_path) {
+                        downloaded_bytes = metadata.len();
+                    }
+                    
                     // Wait before retry
                     std::thread::sleep(Duration::from_millis(config.retry_delay_ms));
                 }
@@ -735,60 +695,187 @@ impl EpgDownloader {
     }
 
     fn try_download(
-        agent: &ureq::Agent,
         url: &str,
         output_path: &str,
+        resume_from: u64,
         config: &DownloadConfig,
         progress: &Option<ProgressCallback>,
     ) -> Result<u64, String> {
+        use std::fs::OpenOptions;
         use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
 
-        let response = agent
-            .get(url)
-            .header("User-Agent", &config.user_agent)
-            .call()
-            .map_err(|e| format!("Request failed: {}", e))?;
+        // Parse URL
+        let (host, port, path) = parse_url(url)?;
 
-        let status = response.status();
-        if status != 200 && status != 206 {
-            return Err(format!("HTTP error: {}", status));
+        // Connect
+        let addr = format!("{}:{}", host, port);
+        let mut stream = TcpStream::connect(&addr).map_err(|e| format!("Connect failed: {}", e))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(config.read_timeout_secs)))
+            .ok();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(config.connect_timeout_secs)))
+            .ok();
+
+        // Build request with Range header for resume
+        let range_header = if resume_from > 0 {
+            format!("Range: bytes={}-\r\n", resume_from)
+        } else {
+            String::new()
+        };
+
+        let request = format!(
+            "GET {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             User-Agent: {}\r\n\
+             Accept-Encoding: identity\r\n\
+             Connection: close\r\n\
+             {}\
+             \r\n",
+            path, host, config.user_agent, range_header
+        );
+
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|e| format!("Send failed: {}", e))?;
+
+        // Read headers
+        let mut header_buf = Vec::with_capacity(4096);
+        let mut byte = [0u8; 1];
+        let mut header_end = false;
+
+        while !header_end {
+            if stream.read_exact(&mut byte).is_err() {
+                break;
+            }
+            header_buf.push(byte[0]);
+            
+            let len = header_buf.len();
+            if len >= 4 && &header_buf[len-4..] == b"\r\n\r\n" {
+                header_end = true;
+            }
         }
 
-        // Get content length if available
-        let total_size: Option<u64> = response
-            .headers()
-            .get("Content-Length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok());
+        let headers = String::from_utf8_lossy(&header_buf);
+        
+        // Check status code
+        let status_line = headers.lines().next().unwrap_or("");
+        let supports_resume = status_line.contains("206");
+        let is_ok = status_line.contains("200") || status_line.contains("206");
+        
+        if !is_ok {
+            return Err(format!("HTTP error: {}", status_line));
+        }
 
-        // Open file for writing
-        let mut file = std::fs::File::create(output_path)
-            .map_err(|e| format!("Create file failed: {}", e))?;
+        // Parse Content-Length if present
+        let content_length: Option<u64> = headers
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("content-length:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok());
 
-        // Stream the response body
-        let mut reader = response.into_body().into_reader();
-        let mut buffer = vec![0u8; config.chunk_size];
-        let mut downloaded: u64 = 0;
+        let total_size = content_length.map(|cl| {
+            if supports_resume {
+                resume_from + cl
+            } else {
+                cl
+            }
+        });
 
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    file.write_all(&buffer[..n])
-                        .map_err(|e| format!("Write failed: {}", e))?;
-                    downloaded += n as u64;
+        // Open file for writing (append if resuming)
+        let mut file = if resume_from > 0 && supports_resume {
+            OpenOptions::new()
+                .append(true)
+                .open(output_path)
+                .map_err(|e| format!("Open file failed: {}", e))?
+        } else {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(output_path)
+                .map_err(|e| format!("Create file failed: {}", e))?
+        };
 
-                    if let Some(ref cb) = progress {
-                        cb(downloaded, total_size);
+        // Check for chunked encoding
+        let is_chunked = headers.to_lowercase().contains("transfer-encoding: chunked");
+
+        // Read body
+        let mut written: u64 = if supports_resume { resume_from } else { 0 };
+        let mut buf = vec![0u8; config.chunk_size];
+
+        if is_chunked {
+            // Handle chunked encoding
+            loop {
+                // Read chunk size line
+                let mut size_line = String::new();
+                loop {
+                    if stream.read_exact(&mut byte).is_err() {
+                        break;
+                    }
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    if byte[0] != b'\r' {
+                        size_line.push(byte[0] as char);
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(format!("Read failed: {}", e)),
+
+                let chunk_size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+                if chunk_size == 0 {
+                    break;
+                }
+
+                // Read chunk data
+                let mut chunk_remaining = chunk_size;
+                while chunk_remaining > 0 {
+                    let to_read = chunk_remaining.min(buf.len());
+                    match stream.read(&mut buf[..to_read]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            file.write_all(&buf[..n])
+                                .map_err(|e| format!("Write failed: {}", e))?;
+                            written += n as u64;
+                            chunk_remaining -= n;
+
+                            if let Some(ref cb) = progress {
+                                cb(written, total_size);
+                            }
+                        }
+                        Err(e) => return Err(format!("Read failed: {}", e)),
+                    }
+                }
+
+                // Skip CRLF after chunk
+                let _ = stream.read_exact(&mut [0u8; 2]);
+            }
+        } else {
+            // Regular content
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        file.write_all(&buf[..n])
+                            .map_err(|e| format!("Write failed: {}", e))?;
+                        written += n as u64;
+
+                        if let Some(ref cb) = progress {
+                            cb(written, total_size);
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        return Err("Read timeout".to_string());
+                    }
+                    Err(e) => return Err(format!("Read failed: {}", e)),
+                }
             }
         }
 
         file.flush().map_err(|e| format!("Flush failed: {}", e))?;
-        Ok(downloaded)
+        Ok(written)
     }
 
     /// Download and parse EPG in one step with retry support
@@ -797,15 +884,14 @@ impl EpgDownloader {
         config: &DownloadConfig,
         progress: Option<ProgressCallback>,
     ) -> Result<EpgData, String> {
-        // Create temp file - use appropriate extension based on URL
-        let ext = if url.ends_with(".gz") { "xml.gz" } else { "xml" };
-        let temp_path = std::env::temp_dir().join(format!("xtreme_iptv_epg.{}", ext));
+        // Create temp file
+        let temp_path = std::env::temp_dir().join("xtreme_iptv_epg.xml");
         let temp_path_str = temp_path.to_string_lossy().to_string();
 
         // Download with retry
         Self::download_to_file(url, &temp_path_str, config, progress)?;
 
-        // Parse the downloaded file (auto-detects gzip)
+        // Parse the downloaded file
         let result = EpgParser::parse_file(&temp_path_str);
 
         // Clean up temp file
@@ -813,6 +899,32 @@ impl EpgDownloader {
 
         result
     }
+}
+
+/// Parse URL into (host, port, path)
+fn parse_url(url: &str) -> Result<(String, u16, String), String> {
+    let url = url.trim();
+    let url = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or("Invalid URL scheme")?;
+
+    let (host_port, path) = if let Some(slash_pos) = url.find('/') {
+        (&url[..slash_pos], url[slash_pos..].to_string())
+    } else {
+        (url, "/".to_string())
+    };
+
+    let (host, port) = if let Some(colon_pos) = host_port.rfind(':') {
+        let port: u16 = host_port[colon_pos + 1..]
+            .parse()
+            .map_err(|_| "Invalid port")?;
+        (host_port[..colon_pos].to_string(), port)
+    } else {
+        (host_port.to_string(), 80)
+    };
+
+    Ok((host, port, path))
 }
 
 #[cfg(test)]
@@ -868,5 +980,18 @@ mod tests {
 
         let epg = EpgParser::parse(xml).unwrap();
         assert_eq!(epg.program_count(), 3);
+    }
+
+    #[test]
+    fn test_parse_url() {
+        let (host, port, path) = parse_url("http://example.com/epg.xml").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 80);
+        assert_eq!(path, "/epg.xml");
+
+        let (host, port, path) = parse_url("http://example.com:8080/path/to/epg.xml").unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8080);
+        assert_eq!(path, "/path/to/epg.xml");
     }
 }

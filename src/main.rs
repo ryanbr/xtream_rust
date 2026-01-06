@@ -180,6 +180,10 @@ enum TaskResult {
         channels: Vec<Channel>,
         playlist_name: Option<String>,
     },
+    PlaylistReloaded {
+        channels: Vec<Channel>,
+        playlist_name: String,
+    },
     // Favorites series viewing
     FavSeasonsLoaded(Vec<i32>),
     FavEpisodesLoaded(Vec<Episode>),
@@ -688,10 +692,13 @@ impl IPTVApp {
                     saved_at: now,
                     enabled: true,
                     auto_login: self.auto_login,
+                    auto_update_days: 0,
+                    last_updated: now,
                     epg_url: self.epg_url_input.clone(),
                     epg_time_offset: self.epg_time_offset,
                     epg_auto_update_index: self.epg_auto_update.to_index(),
                     epg_show_actual_time: self.epg_show_actual_time,
+                    epg_last_updated: 0,
                     external_player: self.external_player.clone(),
                     buffer_seconds: self.buffer_seconds,
                     connection_quality: self.connection_quality,
@@ -706,12 +713,18 @@ impl IPTVApp {
                     matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
                         if server == &self.server && username == &self.username)
                 }) {
-                    // Keep the existing name and auto_login setting
+                    // Keep the existing name, auto_login, auto_update, and epg_last_updated settings
                     let name = existing.name.clone();
                     let auto_login = existing.auto_login;
+                    let auto_update_days = existing.auto_update_days;
+                    let last_updated = existing.last_updated;
+                    let epg_last_updated = existing.epg_last_updated;
                     *existing = entry;
                     existing.name = name;
                     existing.auto_login = auto_login;
+                    existing.auto_update_days = auto_update_days;
+                    existing.last_updated = last_updated;
+                    existing.epg_last_updated = epg_last_updated;
                 } else {
                     self.playlist_entries.push(entry);
                 }
@@ -2040,6 +2053,80 @@ impl IPTVApp {
         });
     }
     
+    /// Reload a playlist in background (for auto-update)
+    fn reload_playlist(&mut self, url: &str, name: &str) {
+        let url = url.to_string();
+        let name = name.to_string();
+        let sender = self.task_sender.clone();
+        let user_agent = self.get_user_agent().to_string();
+        
+        self.status_message = format!("Updating {}...", name);
+        
+        std::thread::spawn(move || {
+            let agent = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(60)))
+                .build()
+                .new_agent();
+            
+            let result = agent.get(&url)
+                .header("User-Agent", &user_agent)
+                .call();
+            
+            match result {
+                Ok(mut response) => {
+                    if let Ok(content) = response.body_mut().read_to_string() {
+                        let channels = if xspf_parser::is_xspf(&content) {
+                            match xspf_parser::parse_xspf(&content) {
+                                Ok(playlist) => {
+                                    let m3u_channels = xspf_parser::to_m3u_channels(&playlist);
+                                    m3u_channels.into_iter().map(|c| {
+                                        Channel {
+                                            stream_id: None,
+                                            name: c.name,
+                                            url: c.url,
+                                            epg_channel_id: c.tvg_id,
+                                            stream_icon: c.tvg_logo,
+                                            category_id: None,
+                                            series_id: None,
+                                            container_extension: None,
+                                            playlist_source: Some(name.clone()),
+                                        }
+                                    }).collect()
+                                }
+                                Err(e) => {
+                                    let _ = sender.send(TaskResult::Error(format!("XSPF parse error: {}", e)));
+                                    return;
+                                }
+                            }
+                        } else {
+                            let playlist = m3u_parser::parse_m3u_playlist(&content);
+                            playlist.channels.into_iter().map(|c| {
+                                Channel {
+                                    stream_id: None,
+                                    name: c.name,
+                                    url: c.url,
+                                    epg_channel_id: c.tvg_id,
+                                    stream_icon: c.tvg_logo,
+                                    category_id: None,
+                                    series_id: None,
+                                    container_extension: None,
+                                    playlist_source: Some(name.clone()),
+                                }
+                            }).collect()
+                        };
+                        
+                        let _ = sender.send(TaskResult::PlaylistReloaded { channels, playlist_name: name });
+                    } else {
+                        let _ = sender.send(TaskResult::Error("Failed to read playlist content".to_string()));
+                    }
+                }
+                Err(e) => {
+                    let _ = sender.send(TaskResult::Error(format!("Failed to fetch playlist: {}", e)));
+                }
+            }
+        });
+    }
+    
     /// Unload a specific playlist by index
     fn unload_playlist(&mut self, idx: usize) {
         if idx >= self.playlist_sources.len() {
@@ -2202,10 +2289,13 @@ impl eframe::App for IPTVApp {
                             saved_at: now,
                             enabled: true,
                             auto_login: false, // Default off for new entries
+                            auto_update_days: 0,
+                            last_updated: now,
                             epg_url: self.epg_url_input.clone(),
                             epg_time_offset: self.epg_time_offset,
                             epg_auto_update_index: self.epg_auto_update.to_index(),
                             epg_show_actual_time: self.epg_show_actual_time,
+                            epg_last_updated: 0,
                             external_player: self.external_player.clone(),
                             buffer_seconds: self.buffer_seconds,
                             connection_quality: self.connection_quality,
@@ -2220,16 +2310,61 @@ impl eframe::App for IPTVApp {
                             matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
                                 if server == &self.server && username == &self.username)
                         }) {
-                            // Keep existing name and auto_login, update rest
+                            // Keep existing name, auto_login, auto_update, and epg_last_updated settings
                             let name = existing.name.clone();
                             let auto_login = existing.auto_login;
+                            let auto_update_days = existing.auto_update_days;
+                            let last_updated = existing.last_updated;
+                            let epg_last_updated = existing.epg_last_updated;
                             *existing = entry;
                             existing.name = name;
                             existing.auto_login = auto_login;
+                            existing.auto_update_days = auto_update_days;
+                            existing.last_updated = last_updated;
+                            existing.epg_last_updated = epg_last_updated;
                         } else {
                             self.playlist_entries.push(entry);
                         }
                         save_playlist_entries(&self.playlist_entries);
+                    }
+                    
+                    // Load EPG cache from disk if available
+                    if !self.epg_url_input.is_empty() && self.epg_data.is_none() {
+                        // Try to load cached EPG data
+                        if let Some(cached_epg) = load_epg_cache::<EpgData>(&self.server, &self.username) {
+                            let channel_count = cached_epg.channels.len();
+                            let program_count = cached_epg.program_count();
+                            self.log(&format!("[INFO] Loaded EPG from cache: {} channels, {} programs", channel_count, program_count));
+                            self.epg_data = Some(Box::new(cached_epg));
+                            self.epg_status = format!("Cached: {} channels, {} programs", channel_count, program_count);
+                            
+                            // Get persistent epg_last_updated from playlist entry
+                            let epg_last_updated = self.playlist_entries.iter().find(|e| {
+                                matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                                    if server == &self.server && username == &self.username)
+                            }).map(|e| e.epg_last_updated).unwrap_or(0);
+                            
+                            // Set in-memory timestamp from persistent storage
+                            if epg_last_updated > 0 {
+                                self.epg_last_update = Some(epg_last_updated);
+                            }
+                            
+                            // Check if cache is stale and needs refresh
+                            if let Some(interval_secs) = self.epg_auto_update.as_secs() {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                
+                                if epg_last_updated > 0 && (now - epg_last_updated) >= interval_secs {
+                                    self.log(&format!("[INFO] EPG cache is stale (last updated {} hours ago), will refresh", 
+                                        (now - epg_last_updated) / 3600));
+                                    // Trigger refresh - the periodic check will handle it
+                                }
+                            }
+                        } else {
+                            self.log("[INFO] No EPG cache found - use EPG button to load");
+                        }
                     }
                 }
                 TaskResult::UserInfoLoaded { user_info, server_info } => {
@@ -2328,14 +2463,31 @@ impl eframe::App for IPTVApp {
                     }
                     self.log("[INFO] =========================================");
                     
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    
+                    // Save EPG cache to disk for persistence across restarts
+                    if !self.server.is_empty() && !self.username.is_empty() {
+                        self.log("[INFO] Saving EPG cache to disk...");
+                        save_epg_cache(&self.server, &self.username, data.as_ref());
+                    }
+                    
                     self.epg_data = Some(data);
                     self.epg_loading = false;
                     self.epg_progress = 1.0;
-                    self.epg_last_update = Some(std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64);
+                    self.epg_last_update = Some(now);
                     self.epg_status = format!("Loaded {} channels, {} programs", channel_count, program_count);
+                    
+                    // Save epg_last_updated to playlist entry for persistence
+                    if let Some(entry) = self.playlist_entries.iter_mut().find(|e| {
+                        matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                            if server == &self.server && username == &self.username)
+                    }) {
+                        entry.epg_last_updated = now;
+                        save_playlist_entries(&self.playlist_entries);
+                    }
                 }
                 TaskResult::EpgError(msg) => {
                     self.log(&format!("[ERROR] EPG: {}", msg));
@@ -2370,6 +2522,62 @@ impl eframe::App for IPTVApp {
                         self.status_message = format!("Total: {} channels from {} playlists", total, self.playlist_sources.len());
                     } else {
                         self.status_message = format!("Loaded: {} ({} channels)", source_name, count);
+                    }
+                    
+                    // Check if this playlist needs immediate auto-update (time elapsed while app was closed)
+                    if let Some(playlist_name) = playlist_name {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        
+                        if let Some((idx, entry)) = self.playlist_entries.iter().enumerate()
+                            .find(|(_, e)| e.name == playlist_name && e.enabled && e.auto_update_days > 0)
+                        {
+                            if let PlaylistType::M3U { url } = &entry.entry_type {
+                                let interval_secs = (entry.auto_update_days as i64) * 24 * 60 * 60;
+                                if entry.last_updated > 0 && (now - entry.last_updated) >= interval_secs {
+                                    let url = url.clone();
+                                    let name = playlist_name.clone();
+                                    self.log(&format!("[INFO] Playlist '{}' needs update (last updated {} days ago)", 
+                                        name, (now - entry.last_updated) / 86400));
+                                    
+                                    // Update timestamp and trigger reload
+                                    self.playlist_entries[idx].last_updated = now;
+                                    save_playlist_entries(&self.playlist_entries);
+                                    self.reload_playlist(&url, &name);
+                                }
+                            }
+                        }
+                    }
+                }
+                TaskResult::PlaylistReloaded { channels, playlist_name } => {
+                    // Find and replace channels for this playlist source
+                    if let Some(idx) = self.playlist_sources.iter().position(|(_, name)| name == &playlist_name) {
+                        let (start_idx, _) = self.playlist_sources[idx];
+                        let end_idx = self.playlist_sources.get(idx + 1)
+                            .map(|(i, _)| *i)
+                            .unwrap_or(self.current_channels.len());
+                        
+                        let old_count = end_idx - start_idx;
+                        let new_count = channels.len();
+                        let diff = new_count as i32 - old_count as i32;
+                        
+                        // Remove old channels
+                        self.current_channels.drain(start_idx..end_idx);
+                        
+                        // Insert new channels at the same position
+                        for (i, channel) in channels.into_iter().enumerate() {
+                            self.current_channels.insert(start_idx + i, channel);
+                        }
+                        
+                        // Update indices for subsequent playlists
+                        for (start, _) in self.playlist_sources.iter_mut().skip(idx + 1) {
+                            *start = (*start as i32 + diff) as usize;
+                        }
+                        
+                        self.log(&format!("[INFO] Updated '{}': {} → {} channels", playlist_name, old_count, new_count));
+                        self.status_message = format!("Updated '{}' ({} channels)", playlist_name, new_count);
                     }
                 }
             }
@@ -2440,29 +2648,62 @@ impl eframe::App for IPTVApp {
             }
         }
         
-        // EPG auto-load on startup if URL is saved
-        if !self.epg_loading && !self.epg_url_input.is_empty() && self.epg_data.is_none() && !self.epg_startup_loaded {
-            self.epg_startup_loaded = true;
-            self.log("[INFO] Loading saved EPG on startup");
-            self.load_epg();
-        }
+        // === Auto-update checks (EPG and Playlist) ===
+        // Share timestamp to avoid duplicate syscalls
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         
-        // EPG auto-update check (periodic refresh)
-        if !self.epg_loading && !self.epg_url_input.is_empty() && self.epg_data.is_some() {
+        // EPG auto-update check (periodic refresh) - only when logged in and interval elapsed
+        if self.logged_in && !self.epg_loading && !self.epg_url_input.is_empty() {
             if let Some(interval_secs) = self.epg_auto_update.as_secs() {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
+                // Get persistent epg_last_updated from playlist entry if available
+                let persistent_last_update = self.playlist_entries.iter().find(|e| {
+                    matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                        if server == &self.server && username == &self.username)
+                }).map(|e| e.epg_last_updated).unwrap_or(0);
                 
-                let should_update = match self.epg_last_update {
-                    Some(last) => (now - last) >= interval_secs,
-                    None => false,
-                };
+                // Use in-memory timestamp if set, otherwise use persistent
+                let last_update = self.epg_last_update.unwrap_or(persistent_last_update);
                 
-                if should_update {
+                // Only update if interval has elapsed (last_update > 0 means it was loaded before)
+                if last_update > 0 && (now - last_update) >= interval_secs {
                     self.log("[INFO] EPG auto-update triggered");
                     self.load_epg();
+                }
+            }
+        }
+        
+        // Playlist auto-update check (periodic refresh for M3U playlists)
+        // Skip if loading/EPG loading, and add 30min stagger after EPG updates
+        if !self.loading && !self.epg_loading {
+            // 30 minute stagger after EPG update to avoid simultaneous requests
+            let stagger_ok = self.epg_last_update.map_or(true, |epg_last| (now - epg_last) >= 1800);
+            
+            if stagger_ok {
+                // Find first M3U playlist that needs updating
+                let playlist_to_update = self.playlist_entries.iter().enumerate()
+                    .filter(|(_, e)| e.enabled && e.auto_update_days > 0)
+                    .filter_map(|(i, entry)| {
+                        if let PlaylistType::M3U { url } = &entry.entry_type {
+                            // Check if loaded and interval elapsed
+                            let is_loaded = self.playlist_sources.iter().any(|(_, name)| name == &entry.name);
+                            let interval_secs = (entry.auto_update_days as i64) * 24 * 60 * 60;
+                            if is_loaded && entry.last_updated > 0 && (now - entry.last_updated) >= interval_secs {
+                                return Some((i, url.clone(), entry.name.clone()));
+                            }
+                        }
+                        None
+                    })
+                    .next();
+                
+                // Trigger background update
+                if let Some((idx, url, name)) = playlist_to_update {
+                    self.log(&format!("[INFO] Playlist auto-update triggered for '{}'", name));
+                    self.playlist_entries[idx].last_updated = now;
+                    save_playlist_entries(&self.playlist_entries);
+                    self.reload_playlist(&url, &name);
                 }
             }
         }
@@ -2490,16 +2731,16 @@ impl eframe::App for IPTVApp {
                     }).map(|e| e.name.as_str());
                     
                     if let Some(name) = current_name {
-                        format!("📺 {} ▼", name)
+                        format!("📺 {} ▼  ", name)
                     } else {
-                        format!("📺 {}@{} ▼", self.username, self.server.split('/').nth(2).unwrap_or(&self.server))
+                        format!("📺 {}@{} ▼  ", self.username, self.server.split('/').nth(2).unwrap_or(&self.server))
                     }
                 } else if loaded_count > 0 {
-                    format!("📺 Playlists ({}/{})", loaded_count, playlist_count)
+                    format!("📺 Playlists ({}/{})  ", loaded_count, playlist_count)
                 } else if playlist_count > 0 {
-                    format!("📺 Playlists ({})", playlist_count)
+                    format!("📺 Playlists ({})  ", playlist_count)
                 } else {
-                    "📺 Playlists".to_string()
+                    "📺 Playlists  ".to_string()
                 };
                 if ui.button(btn_text).on_hover_text("Manage playlists - Add Xtream/M3U sources").clicked() {
                     self.show_playlist_manager = true;
@@ -2548,7 +2789,7 @@ impl eframe::App for IPTVApp {
                 ui.label("🎬 Player:");
                 ui.add(egui::TextEdit::singleline(&mut self.external_player)
                     .hint_text("mpv, vlc, ffplay, internal...")
-                    .desired_width(200.0))
+                    .desired_width(260.0))
                     .on_hover_text("Enter media player command/path:\n• mpv\n• vlc\n• ffplay\n• internal (built-in player)\n• /usr/bin/mpv\n• C:\\Program Files\\VLC\\vlc.exe\n\nLeave empty for ffplay (default)");
                 
                 if ui.button("📁").on_hover_text("Browse for player executable").clicked() {
@@ -3007,10 +3248,13 @@ impl eframe::App for IPTVApp {
                                     saved_at: now,
                                     enabled: true,
                                     auto_login: false,
+                                    auto_update_days: 0,
+                                    last_updated: now,
                                     epg_url: String::new(),
                                     epg_time_offset: 0.0,
                                     epg_auto_update_index: 3,
                                     epg_show_actual_time: false,
+                                    epg_last_updated: 0,
                                     external_player: String::new(),
                                     buffer_seconds: 5,
                                     connection_quality: ConnectionQuality::Normal,
@@ -3056,10 +3300,13 @@ impl eframe::App for IPTVApp {
                                         saved_at: now,
                                         enabled: true,
                                         auto_login: false,
+                                        auto_update_days: 0,
+                                        last_updated: now,
                                         epg_url: String::new(),
                                         epg_time_offset: 0.0,
                                         epg_auto_update_index: 3,
                                         epg_show_actual_time: false,
+                                        epg_last_updated: 0,
                                         external_player: String::new(),
                                         buffer_seconds: 5,
                                         connection_quality: ConnectionQuality::Normal,
@@ -3102,13 +3349,16 @@ impl eframe::App for IPTVApp {
                                     .unwrap_or_default()
                                     .as_secs() as i64;
                                 
-                                // Check if entry exists to preserve auto_login and enabled settings
+                                // Check if entry exists to preserve auto_login, enabled, and auto_update settings
                                 let existing_entry = self.playlist_entries.iter().find(|e| {
                                     matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
                                         if server == &self.server && username == &self.username)
                                 });
                                 let existing_auto_login = existing_entry.map(|e| e.auto_login).unwrap_or(false);
                                 let existing_enabled = existing_entry.map(|e| e.enabled).unwrap_or(true);
+                                let existing_auto_update_days = existing_entry.map(|e| e.auto_update_days).unwrap_or(0);
+                                let existing_last_updated = existing_entry.map(|e| e.last_updated).unwrap_or(now);
+                                let existing_epg_last_updated = existing_entry.map(|e| e.epg_last_updated).unwrap_or(0);
                                 
                                 let entry = PlaylistEntry {
                                     name: name.clone(),
@@ -3120,10 +3370,13 @@ impl eframe::App for IPTVApp {
                                     saved_at: now,
                                     enabled: existing_enabled,
                                     auto_login: existing_auto_login,
+                                    auto_update_days: existing_auto_update_days,
+                                    last_updated: existing_last_updated,
                                     epg_url: self.epg_url_input.clone(),
                                     epg_time_offset: self.epg_time_offset,
                                     epg_auto_update_index: self.epg_auto_update.to_index(),
                                     epg_show_actual_time: self.epg_show_actual_time,
+                                    epg_last_updated: existing_epg_last_updated,
                                     external_player: self.external_player.clone(),
                                     buffer_seconds: self.buffer_seconds,
                                     connection_quality: self.connection_quality,
@@ -3162,6 +3415,7 @@ impl eframe::App for IPTVApp {
                         let mut to_load_m3u: Option<(String, String)> = None; // url, name
                         let mut to_toggle_auto_login: Option<usize> = None;
                         let mut to_toggle_enabled: Option<usize> = None;
+                        let mut to_change_auto_update: Option<(usize, u8)> = None; // (index, new_days)
                         
                         egui::ScrollArea::vertical()
                             .max_height(200.0)
@@ -3230,6 +3484,42 @@ impl eframe::App for IPTVApp {
                                             }
                                         }
                                         
+                                        // Auto-update dropdown (for enabled entries)
+                                        if entry.enabled {
+                                            let update_text = match entry.auto_update_days {
+                                                0 => "⏰Off",
+                                                1 => "⏰1d",
+                                                2 => "⏰2d",
+                                                3 => "⏰3d",
+                                                4 => "⏰4d",
+                                                5 => "⏰5d",
+                                                _ => "⏰?",
+                                            };
+                                            egui::ComboBox::from_id_salt(format!("auto_update_{}", i))
+                                                .selected_text(update_text)
+                                                .width(55.0)
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_label(entry.auto_update_days == 0, "Off").clicked() {
+                                                        to_change_auto_update = Some((i, 0));
+                                                    }
+                                                    if ui.selectable_label(entry.auto_update_days == 1, "1 day").clicked() {
+                                                        to_change_auto_update = Some((i, 1));
+                                                    }
+                                                    if ui.selectable_label(entry.auto_update_days == 2, "2 days").clicked() {
+                                                        to_change_auto_update = Some((i, 2));
+                                                    }
+                                                    if ui.selectable_label(entry.auto_update_days == 3, "3 days").clicked() {
+                                                        to_change_auto_update = Some((i, 3));
+                                                    }
+                                                    if ui.selectable_label(entry.auto_update_days == 4, "4 days").clicked() {
+                                                        to_change_auto_update = Some((i, 4));
+                                                    }
+                                                    if ui.selectable_label(entry.auto_update_days == 5, "5 days").clicked() {
+                                                        to_change_auto_update = Some((i, 5));
+                                                    }
+                                                });
+                                        }
+                                        
                                         // Saved date
                                         if entry.saved_at > 0 {
                                             ui.label(egui::RichText::new(Self::format_datetime(entry.saved_at)).small().weak());
@@ -3258,6 +3548,19 @@ impl eframe::App for IPTVApp {
                         // Handle auto-login toggle
                         if let Some(i) = to_toggle_auto_login {
                             self.playlist_entries[i].auto_login = !self.playlist_entries[i].auto_login;
+                            save_playlist_entries(&self.playlist_entries);
+                        }
+                        
+                        // Handle auto-update change
+                        if let Some((i, days)) = to_change_auto_update {
+                            self.playlist_entries[i].auto_update_days = days;
+                            // Reset last_updated when enabling to prevent immediate update
+                            if days > 0 && self.playlist_entries[i].last_updated == 0 {
+                                self.playlist_entries[i].last_updated = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                            }
                             save_playlist_entries(&self.playlist_entries);
                         }
                         
