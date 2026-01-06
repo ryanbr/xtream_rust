@@ -428,6 +428,7 @@ struct IPTVApp {
     
     // Playlist loading (M3U/M3U8/XSPF)
     show_playlist_dialog: bool,
+    show_playlist_manager: bool,
     playlist_url_input: String,
     playlist_mode: bool,
     playlist_sources: Vec<(usize, String)>, // (start_index, source_name) for separators
@@ -565,6 +566,7 @@ impl IPTVApp {
             show_m3u_dialog: false,
             m3u_url_input: String::new(),
             show_playlist_dialog: false,
+            show_playlist_manager: false,
             playlist_url_input: String::new(),
             playlist_mode: false,
             playlist_sources: Vec::new(),
@@ -779,6 +781,7 @@ impl IPTVApp {
                     stream_icon: None,
                     series_id: Some(series_id),
                     container_extension: Some(container),
+                    playlist_source: fav.playlist_source.clone(),
                 };
                 
                 self.play_channel(&channel);
@@ -796,6 +799,7 @@ impl IPTVApp {
             stream_icon: None,
             series_id: fav.series_id,
             container_extension: fav.container_extension.clone(),
+            playlist_source: fav.playlist_source.clone(),
         };
         self.play_channel(&channel);
     }
@@ -1045,6 +1049,7 @@ impl IPTVApp {
                         stream_icon: s.stream_icon,
                         series_id: None,
                         container_extension: s.container_extension,
+                        playlist_source: None, // From Xtream API, not playlist
                     }
                 }).collect();
                 
@@ -1392,6 +1397,7 @@ impl IPTVApp {
             season_num: None,
             episode_num: None,
             series_name: None,
+            playlist_source: channel.playlist_source.clone(),
         }, reorder);
         
         // Use internal player if enabled OR if user typed "internal" in player field
@@ -1799,6 +1805,7 @@ impl IPTVApp {
             stream_icon: None,
             series_id: Some(series_id),
             container_extension: Some(episode.container_extension.clone()),
+            playlist_source: None,
         };
         
         self.play_channel(&channel);
@@ -1872,6 +1879,13 @@ impl IPTVApp {
         let sender = self.task_sender.clone();
         let user_agent = self.get_user_agent().to_string();
         
+        // Extract a short name from URL for source tracking
+        let url_for_name = url.split('/').last()
+            .unwrap_or(&url)
+            .split('?').next()
+            .unwrap_or(&url)
+            .to_string();
+        
         self.loading = true;
         self.status_message = "Loading playlist...".to_string();
         self.log(&format!("[INFO] Loading playlist: {}", url));
@@ -1894,6 +1908,7 @@ impl IPTVApp {
                             match xspf_parser::parse_xspf(&content) {
                                 Ok(playlist) => {
                                     let name = playlist.title.clone();
+                                    let source_name = name.clone().unwrap_or_else(|| url_for_name.clone());
                                     let m3u_channels = xspf_parser::to_m3u_channels(&playlist);
                                     let channels: Vec<Channel> = m3u_channels.into_iter().map(|c| {
                                         Channel {
@@ -1905,6 +1920,7 @@ impl IPTVApp {
                                             category_id: None,
                                             series_id: None,
                                             container_extension: None,
+                                            playlist_source: Some(source_name.clone()),
                                         }
                                     }).collect();
                                     (channels, name)
@@ -1917,6 +1933,7 @@ impl IPTVApp {
                         } else {
                             // Parse as M3U/M3U8
                             let playlist = m3u_parser::parse_m3u_playlist(&content);
+                            let source_name = url_for_name.clone();
                             let channels: Vec<Channel> = playlist.channels.into_iter().map(|c| {
                                 Channel {
                                     stream_id: None,
@@ -1927,6 +1944,7 @@ impl IPTVApp {
                                     category_id: None,
                                     series_id: None,
                                     container_extension: None,
+                                    playlist_source: Some(source_name.clone()),
                                 }
                             }).collect();
                             (channels, None)
@@ -2198,6 +2216,16 @@ impl eframe::App for IPTVApp {
                 
                 if ui.button("📺 Load Playlist").on_hover_text("Load M3U/M3U8/XSPF playlist URL").clicked() {
                     self.show_playlist_dialog = true;
+                }
+                
+                // Show manage button only if playlists are loaded
+                if !self.playlist_sources.is_empty() {
+                    if ui.button(format!("📋 ({})", self.playlist_sources.len()))
+                        .on_hover_text("Manage loaded playlists")
+                        .clicked() 
+                    {
+                        self.show_playlist_manager = true;
+                    }
                 }
                 
                 if ui.button("🌐 User Agent").clicked() {
@@ -2825,6 +2853,126 @@ impl eframe::App for IPTVApp {
                 });
         }
 
+        // Playlist Manager Window
+        if self.show_playlist_manager {
+            egui::Window::new("📋 Manage Playlists")
+                .collapsible(false)
+                .resizable(true)
+                .min_width(400.0)
+                .show(ctx, |ui| {
+                    ui.heading("Loaded Playlists");
+                    ui.separator();
+                    
+                    if self.playlist_sources.is_empty() {
+                        ui.label("No playlists loaded");
+                    } else {
+                        let mut to_remove: Option<usize> = None;
+                        
+                        // Calculate channel counts per playlist
+                        let playlist_infos: Vec<_> = self.playlist_sources.iter().enumerate().map(|(i, (start_idx, name))| {
+                            let end_idx = self.playlist_sources.get(i + 1)
+                                .map(|(next_start, _)| *next_start)
+                                .unwrap_or(self.current_channels.len());
+                            let count = end_idx - start_idx;
+                            (i, name.clone(), *start_idx, end_idx, count)
+                        }).collect();
+                        
+                        for (idx, name, _start, _end, count) in &playlist_infos {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("📺 {} ({} channels)", name, count));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("🗑").on_hover_text("Remove this playlist and related favorites/recent").clicked() {
+                                        to_remove = Some(*idx);
+                                    }
+                                });
+                            });
+                            ui.separator();
+                        }
+                        
+                        // Handle removal
+                        if let Some(idx) = to_remove {
+                            if let Some((_, name, start_idx, end_idx, _)) = playlist_infos.get(idx) {
+                                let playlist_name = name.clone();
+                                let channels_to_remove = end_idx - start_idx;
+                                
+                                // Remove channels from current_channels
+                                if *start_idx < self.current_channels.len() {
+                                    let actual_end = (*end_idx).min(self.current_channels.len());
+                                    self.current_channels.drain(*start_idx..actual_end);
+                                }
+                                
+                                // Remove from playlist_sources
+                                self.playlist_sources.remove(idx);
+                                
+                                // Update start indices for remaining playlists
+                                for (start, _) in self.playlist_sources.iter_mut().skip(idx) {
+                                    *start = start.saturating_sub(channels_to_remove);
+                                }
+                                
+                                // Remove related favorites
+                                self.favorites.retain(|f| {
+                                    f.playlist_source.as_ref() != Some(&playlist_name)
+                                });
+                                self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
+                                
+                                // Remove related recent
+                                self.recent_watched.retain(|f| {
+                                    f.playlist_source.as_ref() != Some(&playlist_name)
+                                });
+                                self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
+                                
+                                self.config.save();
+                                
+                                // Update playlist mode
+                                if self.playlist_sources.is_empty() {
+                                    self.playlist_mode = false;
+                                    self.current_channels.clear();
+                                }
+                                
+                                self.status_message = format!("Removed playlist '{}' and {} related items", playlist_name, channels_to_remove);
+                            }
+                        }
+                    }
+                    
+                    ui.add_space(8.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            self.show_playlist_manager = false;
+                        }
+                        
+                        if !self.playlist_sources.is_empty() {
+                            if ui.button("🗑 Clear All").on_hover_text("Remove all playlists").clicked() {
+                                // Get all playlist names to remove from favorites/recent
+                                let playlist_names: Vec<_> = self.playlist_sources.iter()
+                                    .map(|(_, name)| name.clone())
+                                    .collect();
+                                
+                                self.current_channels.clear();
+                                self.playlist_sources.clear();
+                                self.playlist_mode = false;
+                                
+                                // Remove related favorites
+                                self.favorites.retain(|f| {
+                                    f.playlist_source.as_ref().map_or(true, |src| !playlist_names.contains(src))
+                                });
+                                self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
+                                
+                                // Remove related recent
+                                self.recent_watched.retain(|f| {
+                                    f.playlist_source.as_ref().map_or(true, |src| !playlist_names.contains(src))
+                                });
+                                self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
+                                
+                                self.config.save();
+                                self.status_message = "All playlists cleared".to_string();
+                                self.show_playlist_manager = false;
+                            }
+                        }
+                    });
+                });
+        }
+
         // User Agent Dialog
         if self.show_user_agent_dialog {
             egui::Window::new("🌐 User Agent Settings")
@@ -3170,6 +3318,7 @@ impl IPTVApp {
                             season_num: None,
                             episode_num: None,
                             series_name: None,
+                            playlist_source: channel.playlist_source.clone(),
                         });
                     }
                     
@@ -3337,6 +3486,7 @@ impl IPTVApp {
                             season_num: None,
                             episode_num: None,
                             series_name: None,
+                            playlist_source: None,
                         });
                     }
                     
@@ -3434,6 +3584,7 @@ impl IPTVApp {
                             season_num: Some(season),
                             episode_num: None,
                             series_name: Some(series_name.clone()),
+                            playlist_source: None,
                         });
                     }
                 });
@@ -3466,6 +3617,7 @@ impl IPTVApp {
                                 season_num: Some(season),
                                 episode_num: Some(ep.episode_num),
                                 series_name: Some(series_name.clone()),
+                                playlist_source: None,
                             });
                         }
                         
@@ -3514,6 +3666,7 @@ impl IPTVApp {
                             season_num: Some(*season),
                             episode_num: None,
                             series_name: Some(series_name.clone()),
+                            playlist_source: None,
                         });
                     }
                     
@@ -3584,7 +3737,11 @@ impl IPTVApp {
                             }
                             ui.label(Self::sanitize_text(&fav.name));
                             self.show_epg_inline(ui, &fav.name, None);
-                            ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
+                            if let Some(ref src) = fav.playlist_source {
+                                ui.label(egui::RichText::new(format!("[{}]", src)).small().color(egui::Color32::from_rgb(100, 149, 237)));
+                            } else {
+                                ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
+                            }
                         });
                     }
                 });
@@ -3603,7 +3760,11 @@ impl IPTVApp {
                                 to_play = Some(fav.clone());
                             }
                             ui.label(Self::sanitize_text(&fav.name));
-                            ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
+                            if let Some(ref src) = fav.playlist_source {
+                                ui.label(egui::RichText::new(format!("[{}]", src)).small().color(egui::Color32::from_rgb(100, 149, 237)));
+                            } else {
+                                ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&fav.category_name))).weak());
+                            }
                         });
                     }
                 });
@@ -3782,7 +3943,12 @@ impl IPTVApp {
                 // Show EPG info (will only display if EPG match found)
                 self.show_epg_inline(ui, &item.name, None);
                 
-                ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&item.category_name))).weak());
+                // Show playlist source or category
+                if let Some(ref src) = item.playlist_source {
+                    ui.label(egui::RichText::new(format!("[{}]", src)).small().color(egui::Color32::from_rgb(100, 149, 237)));
+                } else {
+                    ui.label(egui::RichText::new(format!("({})", Self::sanitize_text(&item.category_name))).weak());
+                }
                 
                 // Remove from history button
                 if ui.small_button("✕").on_hover_text("Remove from history").clicked() {
@@ -4043,6 +4209,7 @@ impl IPTVApp {
                                             stream_icon: None,
                                             series_id: None,
                                             container_extension: None,
+                                            playlist_source: f.playlist_source.clone(),
                                         })
                                 })
                                 .or_else(|| {
@@ -4058,6 +4225,7 @@ impl IPTVApp {
                                             stream_icon: None,
                                             series_id: None,
                                             container_extension: None,
+                                            playlist_source: f.playlist_source.clone(),
                                         })
                                 });
                             

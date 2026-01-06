@@ -35,6 +35,7 @@ pub struct Channel {
     pub stream_icon: Option<String>,
     pub series_id: Option<i64>,
     pub container_extension: Option<String>,
+    pub playlist_source: Option<String>, // Which playlist this came from
 }
 
 /// User account information
@@ -75,4 +76,7 @@ pub struct FavoriteItem {
     pub episode_num: Option<i32>,
     #[serde(default)]
     pub series_name: Option<String>,
+    // Playlist source tracking
+    #[serde(default)]
+    pub playlist_source: Option<String>,
 }
