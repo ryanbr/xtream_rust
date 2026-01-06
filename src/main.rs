@@ -3113,19 +3113,22 @@ impl IPTVApp {
             };
             
             match sort_order {
-                SortOrder::NameAsc => channels.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-                SortOrder::NameDesc => channels.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
+                SortOrder::NameAsc => channels.sort_by_cached_key(|c| c.name.to_lowercase()),
+                SortOrder::NameDesc => {
+                    channels.sort_by_cached_key(|c| c.name.to_lowercase());
+                    channels.reverse();
+                }
                 SortOrder::Default => {} // Keep server order
             }
             
-            let playlist_sources = self.playlist_sources.clone();
+            let playlist_sources = &self.playlist_sources;
             let mut toggle_fav: Option<FavoriteItem> = None;
             let mut to_play: Option<Channel> = None;
             
             for (idx, channel) in channels.iter().enumerate() {
                 // Show separator header for playlist sources (only in playlist mode)
                 if self.playlist_mode && !playlist_sources.is_empty() {
-                    for (start_idx, source_name) in &playlist_sources {
+                    for (start_idx, source_name) in playlist_sources {
                         if *start_idx == idx {
                             ui.add_space(8.0);
                             ui.separator();
@@ -3206,8 +3209,11 @@ impl IPTVApp {
         };
         
         match sort_order {
-            SortOrder::NameAsc => sorted_categories.sort_by(|a, b| a.category_name.to_lowercase().cmp(&b.category_name.to_lowercase())),
-            SortOrder::NameDesc => sorted_categories.sort_by(|a, b| b.category_name.to_lowercase().cmp(&a.category_name.to_lowercase())),
+            SortOrder::NameAsc => sorted_categories.sort_by_cached_key(|c| c.category_name.to_lowercase()),
+            SortOrder::NameDesc => {
+                sorted_categories.sort_by_cached_key(|c| c.category_name.to_lowercase());
+                sorted_categories.reverse();
+            }
             SortOrder::Default => {} // Keep server order
         }
         
@@ -3291,8 +3297,11 @@ impl IPTVApp {
             // Clone and sort series
             let mut series_list: Vec<_> = self.current_series.clone();
             match self.series_sort_order {
-                SortOrder::NameAsc => series_list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-                SortOrder::NameDesc => series_list.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
+                SortOrder::NameAsc => series_list.sort_by_cached_key(|s| s.name.to_lowercase()),
+                SortOrder::NameDesc => {
+                    series_list.sort_by_cached_key(|s| s.name.to_lowercase());
+                    series_list.reverse();
+                }
                 SortOrder::Default => {} // Keep server order
             }
             
@@ -3355,8 +3364,11 @@ impl IPTVApp {
         // Clone and sort categories
         let mut sorted_categories: Vec<_> = self.series_categories.clone();
         match self.series_sort_order {
-            SortOrder::NameAsc => sorted_categories.sort_by(|a, b| a.category_name.to_lowercase().cmp(&b.category_name.to_lowercase())),
-            SortOrder::NameDesc => sorted_categories.sort_by(|a, b| b.category_name.to_lowercase().cmp(&a.category_name.to_lowercase())),
+            SortOrder::NameAsc => sorted_categories.sort_by_cached_key(|c| c.category_name.to_lowercase()),
+            SortOrder::NameDesc => {
+                sorted_categories.sort_by_cached_key(|c| c.category_name.to_lowercase());
+                sorted_categories.reverse();
+            }
             SortOrder::Default => {} // Keep server order
         }
         
