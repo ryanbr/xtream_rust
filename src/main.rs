@@ -465,7 +465,6 @@ struct IPTVApp {
     epg_time_offset: f32,
     epg_auto_update: EpgAutoUpdate,
     epg_last_update: Option<i64>,
-    epg_startup_loaded: bool,
     epg_last_ui_refresh: i64,
     epg_show_actual_time: bool, // false = offset mode (Now, +30m), true = actual time (8:00 PM)
     selected_epg_channel: Option<String>,
@@ -638,7 +637,6 @@ impl IPTVApp {
             epg_time_offset: epg_time_offset,
             epg_auto_update: EpgAutoUpdate::from_index(epg_auto_update_index),
             epg_last_update: None,
-            epg_startup_loaded: false,
             epg_last_ui_refresh: 0,
             epg_show_actual_time: epg_show_actual_time,
             selected_epg_channel: None,
@@ -810,7 +808,6 @@ impl IPTVApp {
         self.epg_time_offset = 0.0;
         self.epg_auto_update = EpgAutoUpdate::Day1;
         self.epg_show_actual_time = false;
-        self.epg_startup_loaded = false;
         self.selected_epg_channel = None;
         
         // Reset player settings to defaults
@@ -3588,7 +3585,6 @@ impl eframe::App for IPTVApp {
                                 // Clear EPG data for new provider
                                 self.epg_data = None;
                                 self.epg_last_update = None;
-                                self.epg_startup_loaded = false;
                                 // Player settings
                                 if !entry.external_player.is_empty() {
                                     self.external_player = entry.external_player.clone();
