@@ -742,11 +742,12 @@ impl IPTVApp {
     
     fn toggle_favorite(&mut self, item: FavoriteItem) {
         if let Some(pos) = self.favorites.iter().position(|f| f.url == item.url) {
+            let name = self.favorites[pos].name.clone();
             self.favorites.remove(pos);
-            self.status_message = format!("Removed '{}' from favorites", item.name);
+            self.status_message = format!("Removed '{}' from favorites", name);
         } else {
-            self.favorites.push(item.clone());
             self.status_message = format!("Added '{}' to favorites", item.name);
+            self.favorites.push(item);
         }
         // Auto-save favorites
         self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
