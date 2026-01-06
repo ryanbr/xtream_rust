@@ -228,6 +228,87 @@ pub struct SavedCredential {
     pub epg_show_actual_time: bool,
 }
 
+/// Unified playlist entry - can be Xtream API or M3U/XSPF playlist
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistEntry {
+    pub name: String,
+    pub entry_type: PlaylistType,
+    #[serde(default)]
+    pub saved_at: i64,
+    // Enabled/disabled state
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    // Auto-login on startup
+    #[serde(default)]
+    pub auto_login: bool,
+    // EPG settings
+    #[serde(default)]
+    pub epg_url: String,
+    #[serde(default)]
+    pub epg_time_offset: f32,
+    #[serde(default = "default_epg_auto_update")]
+    pub epg_auto_update_index: u8,
+    #[serde(default)]
+    pub epg_show_actual_time: bool,
+    // Player settings
+    #[serde(default)]
+    pub external_player: String,
+    #[serde(default = "default_buffer")]
+    pub buffer_seconds: u32,
+    #[serde(default)]
+    pub connection_quality: ConnectionQuality,
+    // User agent settings
+    #[serde(default)]
+    pub selected_user_agent: usize,
+    #[serde(default)]
+    pub custom_user_agent: String,
+    #[serde(default)]
+    pub use_custom_user_agent: bool,
+    #[serde(default = "default_true")]
+    pub pass_user_agent_to_player: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PlaylistType {
+    Xtream {
+        server: String,
+        username: String,
+        password: String,
+    },
+    M3U {
+        url: String,
+    },
+}
+
+fn playlist_manager_path() -> PathBuf {
+    let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push("xtreme_iptv");
+    fs::create_dir_all(&path).ok();
+    path.push("playlists.json");
+    path
+}
+
+pub fn load_playlist_entries() -> Vec<PlaylistEntry> {
+    let path = playlist_manager_path();
+    
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(entries) = serde_json::from_str(&content) {
+                return entries;
+            }
+        }
+    }
+    
+    Vec::new()
+}
+
+pub fn save_playlist_entries(entries: &[PlaylistEntry]) {
+    let path = playlist_manager_path();
+    if let Ok(content) = serde_json::to_string_pretty(entries) {
+        let _ = fs::write(path, content);
+    }
+}
+
 fn address_book_path() -> PathBuf {
     let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("xtreme_iptv");

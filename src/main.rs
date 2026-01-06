@@ -420,16 +420,14 @@ struct IPTVApp {
     
     // Config
     config: AppConfig,
-    address_book: Vec<SavedCredential>,
-    show_address_book: bool,
-    show_reset_confirm: bool,
-    show_m3u_dialog: bool,
-    m3u_url_input: String,
-    
-    // Playlist loading (M3U/M3U8/XSPF)
-    show_playlist_dialog: bool,
+    address_book: Vec<SavedCredential>, // Legacy - kept for migration
+    playlist_entries: Vec<PlaylistEntry>, // New unified playlist manager
     show_playlist_manager: bool,
+    playlist_name_input: String,
     playlist_url_input: String,
+    show_reset_confirm: bool,
+    
+    // Playlist loading state (M3U/M3U8/XSPF)
     playlist_mode: bool,
     playlist_sources: Vec<(usize, String)>, // (start_index, source_name) for separators
     
@@ -473,18 +471,26 @@ impl Default for IPTVApp {
 impl IPTVApp {
     fn new() -> Self {
         let config = AppConfig::load();
-        let address_book = load_address_book();
+        let address_book = load_address_book(); // Legacy
+        let playlist_entries = load_playlist_entries();
         let (task_sender, task_receiver) = channel();
         
         // Load saved credentials if save_state is enabled
-        let (server, username, password) = if config.save_state {
-            (
-                config.saved_server.clone(),
-                config.saved_username.clone(),
-                config.saved_password.clone(),
-            )
+        // Also try to load per-playlist settings from playlist_entries
+        let (server, username, password, playlist_settings) = if config.save_state {
+            let server = config.saved_server.clone();
+            let username = config.saved_username.clone();
+            let password = config.saved_password.clone();
+            
+            // Find matching playlist entry to get per-playlist settings
+            let settings = playlist_entries.iter().find(|e| {
+                matches!(&e.entry_type, PlaylistType::Xtream { server: s, username: u, .. } 
+                    if s == &server && u == &username)
+            }).cloned();
+            
+            (server, username, password, settings)
         } else {
-            (String::new(), String::new(), String::new())
+            (String::new(), String::new(), String::new(), None)
         };
         
         // Load favorites from JSON
@@ -501,13 +507,47 @@ impl IPTVApp {
             Vec::new()
         };
         
-        // Extract values before moving config
+        // Extract values - prefer playlist-specific settings over global config
         let single_window_mode = config.single_window_mode;
         let hw_accel = config.hw_accel;
-        let epg_url = config.epg_url.clone();
-        let epg_auto_update_index = config.epg_auto_update_index;
-        let epg_time_offset = config.epg_time_offset;
-        let epg_show_actual_time = config.epg_show_actual_time;
+        
+        // Use per-playlist EPG settings if available, otherwise fall back to global config
+        let (epg_url, epg_auto_update_index, epg_time_offset, epg_show_actual_time) = 
+            if let Some(ref ps) = playlist_settings {
+                (
+                    if ps.epg_url.is_empty() { config.epg_url.clone() } else { ps.epg_url.clone() },
+                    ps.epg_auto_update_index,
+                    ps.epg_time_offset,
+                    ps.epg_show_actual_time,
+                )
+            } else {
+                (config.epg_url.clone(), config.epg_auto_update_index, config.epg_time_offset, config.epg_show_actual_time)
+            };
+        
+        // Use per-playlist player settings if available
+        let (external_player, buffer_seconds, connection_quality) = 
+            if let Some(ref ps) = playlist_settings {
+                (
+                    if ps.external_player.is_empty() { config.external_player.clone() } else { ps.external_player.clone() },
+                    ps.buffer_seconds,
+                    ps.connection_quality,
+                )
+            } else {
+                (config.external_player.clone(), config.buffer_seconds, config.connection_quality)
+            };
+        
+        // Use per-playlist user agent settings if available
+        let (selected_user_agent, custom_user_agent, use_custom_user_agent, pass_user_agent_to_player) = 
+            if let Some(ref ps) = playlist_settings {
+                (
+                    ps.selected_user_agent,
+                    ps.custom_user_agent.clone(),
+                    ps.use_custom_user_agent,
+                    ps.pass_user_agent_to_player,
+                )
+            } else {
+                (config.selected_user_agent, config.custom_user_agent.clone(), config.use_custom_user_agent, config.pass_user_agent_to_player)
+            };
         
         Self {
             server,
@@ -546,28 +586,26 @@ impl IPTVApp {
             user_info: UserInfo::default(),
             server_info: ServerInfo::default(),
             search_query: String::new(),
-            external_player: config.external_player.clone(),
-            buffer_seconds: config.buffer_seconds,
-            connection_quality: config.connection_quality,
+            external_player,
+            buffer_seconds,
+            connection_quality,
             dark_mode: config.dark_mode,
             use_post_method: false,
             save_state: config.save_state,
             auto_login: config.auto_login,
             auto_login_triggered: false,
-            selected_user_agent: config.selected_user_agent,
-            custom_user_agent: config.custom_user_agent.clone(),
-            use_custom_user_agent: config.use_custom_user_agent,
-            pass_user_agent_to_player: config.pass_user_agent_to_player,
+            selected_user_agent,
+            custom_user_agent,
+            use_custom_user_agent,
+            pass_user_agent_to_player,
             show_user_agent_dialog: false,
             config,
             address_book,
-            show_address_book: false,
-            show_reset_confirm: false,
-            show_m3u_dialog: false,
-            m3u_url_input: String::new(),
-            show_playlist_dialog: false,
+            playlist_entries,
             show_playlist_manager: false,
+            playlist_name_input: String::new(),
             playlist_url_input: String::new(),
+            show_reset_confirm: false,
             playlist_mode: false,
             playlist_sources: Vec::new(),
             console_log: vec!["[INFO] Xtreme IPTV Player started".to_string()],
@@ -632,19 +670,28 @@ impl IPTVApp {
             self.config.saved_username = self.username.clone();
             self.config.saved_password = self.password.clone();
             
-            // Also save to Address Book if server is set
-            if !self.server.is_empty() {
+            // Also save to playlist_entries if this is an Xtream server
+            if !self.server.is_empty() && !self.username.is_empty() {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
                 
-                // Create credential entry
-                let cred = SavedCredential {
-                    server: self.server.clone(),
-                    username: self.username.clone(),
-                    password: self.password.clone(),
+                // Create playlist entry with all current settings
+                let entry = PlaylistEntry {
+                    name: format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server)),
+                    entry_type: PlaylistType::Xtream {
+                        server: self.server.clone(),
+                        username: self.username.clone(),
+                        password: self.password.clone(),
+                    },
                     saved_at: now,
+                    enabled: true,
+                    auto_login: self.auto_login,
+                    epg_url: self.epg_url_input.clone(),
+                    epg_time_offset: self.epg_time_offset,
+                    epg_auto_update_index: self.epg_auto_update.to_index(),
+                    epg_show_actual_time: self.epg_show_actual_time,
                     external_player: self.external_player.clone(),
                     buffer_seconds: self.buffer_seconds,
                     connection_quality: self.connection_quality,
@@ -652,19 +699,23 @@ impl IPTVApp {
                     custom_user_agent: self.custom_user_agent.clone(),
                     use_custom_user_agent: self.use_custom_user_agent,
                     pass_user_agent_to_player: self.pass_user_agent_to_player,
-                    epg_url: self.epg_url_input.clone(),
-                    epg_time_offset: self.epg_time_offset,
-                    epg_auto_update_index: self.epg_auto_update.to_index(),
-                    epg_show_actual_time: self.epg_show_actual_time,
                 };
                 
                 // Update existing entry or add new one (match by server+username)
-                if let Some(existing) = self.address_book.iter_mut().find(|c| c.server == cred.server && c.username == cred.username) {
-                    *existing = cred;
+                if let Some(existing) = self.playlist_entries.iter_mut().find(|e| {
+                    matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                        if server == &self.server && username == &self.username)
+                }) {
+                    // Keep the existing name and auto_login setting
+                    let name = existing.name.clone();
+                    let auto_login = existing.auto_login;
+                    *existing = entry;
+                    existing.name = name;
+                    existing.auto_login = auto_login;
                 } else {
-                    self.address_book.push(cred);
+                    self.playlist_entries.push(entry);
                 }
-                save_address_book(&self.address_book);
+                save_playlist_entries(&self.playlist_entries);
             }
         } else {
             self.config.saved_server.clear();
@@ -683,9 +734,18 @@ impl IPTVApp {
         self.username.clear();
         self.password.clear();
         
-        // Clear address book
+        // Clear address book (legacy)
         self.address_book.clear();
         save_address_book(&self.address_book);
+        
+        // Clear playlist entries
+        self.playlist_entries.clear();
+        save_playlist_entries(&self.playlist_entries);
+        
+        // Clear loaded playlists
+        self.current_channels.clear();
+        self.playlist_sources.clear();
+        self.playlist_mode = false;
         
         // Clear favorites and recent
         self.favorites.clear();
@@ -1874,6 +1934,152 @@ impl IPTVApp {
             }
         }
     }
+    
+    /// Parse Xtream credentials from M3U Plus URL - returns (server, username, password)
+    fn parse_xtream_url(url: &str) -> Option<(String, String, String)> {
+        if let Some(query_start) = url.find('?') {
+            let query = &url[query_start + 1..];
+            let mut params: HashMap<&str, &str> = HashMap::new();
+            
+            for pair in query.split('&') {
+                if let Some((key, value)) = pair.split_once('=') {
+                    params.insert(key, value);
+                }
+            }
+            
+            if let (Some(&user), Some(&pass)) = (params.get("username"), params.get("password")) {
+                // Extract server
+                if let Some(proto_end) = url.find("://") {
+                    let rest = &url[proto_end + 3..];
+                    if let Some(path_start) = rest.find('/') {
+                        let server = url[..proto_end + 3 + path_start].to_string();
+                        return Some((server, user.to_string(), pass.to_string()));
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    /// Load playlist with a specific name (for saved playlists)
+    fn load_playlist_with_name(&mut self, url: &str, name: &str) {
+        let url = url.to_string();
+        let name = name.to_string();
+        let sender = self.task_sender.clone();
+        let user_agent = self.get_user_agent().to_string();
+        
+        self.loading = true;
+        self.status_message = format!("Loading {}...", name);
+        self.log(&format!("[INFO] Loading playlist: {} ({})", name, url));
+        
+        std::thread::spawn(move || {
+            let agent = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(60)))
+                .build()
+                .new_agent();
+            
+            let result = agent.get(&url)
+                .header("User-Agent", &user_agent)
+                .call();
+            
+            match result {
+                Ok(mut response) => {
+                    if let Ok(content) = response.body_mut().read_to_string() {
+                        let (channels, playlist_name) = if xspf_parser::is_xspf(&content) {
+                            match xspf_parser::parse_xspf(&content) {
+                                Ok(playlist) => {
+                                    let pname = playlist.title.clone().unwrap_or_else(|| name.clone());
+                                    let m3u_channels = xspf_parser::to_m3u_channels(&playlist);
+                                    let channels: Vec<Channel> = m3u_channels.into_iter().map(|c| {
+                                        Channel {
+                                            stream_id: None,
+                                            name: c.name,
+                                            url: c.url,
+                                            epg_channel_id: c.tvg_id,
+                                            stream_icon: c.tvg_logo,
+                                            category_id: None,
+                                            series_id: None,
+                                            container_extension: None,
+                                            playlist_source: Some(name.clone()),
+                                        }
+                                    }).collect();
+                                    (channels, Some(pname))
+                                }
+                                Err(e) => {
+                                    let _ = sender.send(TaskResult::Error(format!("XSPF parse error: {}", e)));
+                                    return;
+                                }
+                            }
+                        } else {
+                            let playlist = m3u_parser::parse_m3u_playlist(&content);
+                            let channels: Vec<Channel> = playlist.channels.into_iter().map(|c| {
+                                Channel {
+                                    stream_id: None,
+                                    name: c.name,
+                                    url: c.url,
+                                    epg_channel_id: c.tvg_id,
+                                    stream_icon: c.tvg_logo,
+                                    category_id: None,
+                                    series_id: None,
+                                    container_extension: None,
+                                    playlist_source: Some(name.clone()),
+                                }
+                            }).collect();
+                            (channels, Some(name.clone()))
+                        };
+                        
+                        let _ = sender.send(TaskResult::PlaylistLoaded { channels, playlist_name });
+                    } else {
+                        let _ = sender.send(TaskResult::Error("Failed to read playlist content".to_string()));
+                    }
+                }
+                Err(e) => {
+                    let _ = sender.send(TaskResult::Error(format!("Failed to fetch playlist: {}", e)));
+                }
+            }
+        });
+    }
+    
+    /// Unload a specific playlist by index
+    fn unload_playlist(&mut self, idx: usize) {
+        if idx >= self.playlist_sources.len() {
+            return;
+        }
+        
+        let (start_idx, name) = self.playlist_sources[idx].clone();
+        let end_idx = self.playlist_sources.get(idx + 1)
+            .map(|(next_start, _)| *next_start)
+            .unwrap_or(self.current_channels.len());
+        
+        let channels_to_remove = end_idx - start_idx;
+        
+        // Remove channels
+        if start_idx < self.current_channels.len() {
+            let actual_end = end_idx.min(self.current_channels.len());
+            self.current_channels.drain(start_idx..actual_end);
+        }
+        
+        // Remove from sources
+        self.playlist_sources.remove(idx);
+        
+        // Update indices
+        for (start, _) in self.playlist_sources.iter_mut().skip(idx) {
+            *start = start.saturating_sub(channels_to_remove);
+        }
+        
+        // Remove related favorites/recent
+        self.favorites.retain(|f| f.playlist_source.as_ref() != Some(&name));
+        self.recent_watched.retain(|f| f.playlist_source.as_ref() != Some(&name));
+        self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
+        self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
+        self.config.save();
+        
+        if self.playlist_sources.is_empty() {
+            self.playlist_mode = false;
+        }
+        
+        self.status_message = format!("Unloaded '{}' ({} channels)", name, channels_to_remove);
+    }
 
     fn load_playlist(&mut self, url: &str) {
         let url = url.to_string();
@@ -1978,6 +2184,53 @@ impl eframe::App for IPTVApp {
                     self.logged_in = true;
                     self.loading = false;
                     self.status_message = "Logged in successfully".to_string();
+                    
+                    // Auto-save to playlist_entries if save_state is enabled
+                    if self.save_state && !self.server.is_empty() && !self.username.is_empty() {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        
+                        let entry = PlaylistEntry {
+                            name: format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server)),
+                            entry_type: PlaylistType::Xtream {
+                                server: self.server.clone(),
+                                username: self.username.clone(),
+                                password: self.password.clone(),
+                            },
+                            saved_at: now,
+                            enabled: true,
+                            auto_login: false, // Default off for new entries
+                            epg_url: self.epg_url_input.clone(),
+                            epg_time_offset: self.epg_time_offset,
+                            epg_auto_update_index: self.epg_auto_update.to_index(),
+                            epg_show_actual_time: self.epg_show_actual_time,
+                            external_player: self.external_player.clone(),
+                            buffer_seconds: self.buffer_seconds,
+                            connection_quality: self.connection_quality,
+                            selected_user_agent: self.selected_user_agent,
+                            custom_user_agent: self.custom_user_agent.clone(),
+                            use_custom_user_agent: self.use_custom_user_agent,
+                            pass_user_agent_to_player: self.pass_user_agent_to_player,
+                        };
+                        
+                        // Update existing or add new
+                        if let Some(existing) = self.playlist_entries.iter_mut().find(|e| {
+                            matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                                if server == &self.server && username == &self.username)
+                        }) {
+                            // Keep existing name and auto_login, update rest
+                            let name = existing.name.clone();
+                            let auto_login = existing.auto_login;
+                            *existing = entry;
+                            existing.name = name;
+                            existing.auto_login = auto_login;
+                        } else {
+                            self.playlist_entries.push(entry);
+                        }
+                        save_playlist_entries(&self.playlist_entries);
+                    }
                 }
                 TaskResult::UserInfoLoaded { user_info, server_info } => {
                     self.log(&format!("[INFO] User: {} | Status: {} | Expiry: {}", 
@@ -2140,13 +2393,50 @@ impl eframe::App for IPTVApp {
             }
         }
         
-        // Auto-login on startup if enabled
-        if self.save_state && self.auto_login && !self.auto_login_triggered && !self.logged_in && !self.loading {
-            if !self.server.is_empty() && !self.username.is_empty() && !self.password.is_empty() {
+        // Auto-login on startup - check playlist_entries for auto_login flag (must be enabled)
+        if !self.auto_login_triggered && !self.logged_in && !self.loading {
+            // Find first entry with auto_login enabled AND playlist enabled
+            let auto_login_idx = self.playlist_entries.iter().position(|e| {
+                e.enabled && e.auto_login && matches!(e.entry_type, PlaylistType::Xtream { .. })
+            });
+            
+            if let Some(idx) = auto_login_idx {
                 self.auto_login_triggered = true;
-                self.login();
+                let entry = &self.playlist_entries[idx];
+                if let PlaylistType::Xtream { server, username, password } = &entry.entry_type {
+                    // Load settings from entry
+                    self.server = server.clone();
+                    self.username = username.clone();
+                    self.password = password.clone();
+                    if !entry.epg_url.is_empty() {
+                        self.epg_url_input = entry.epg_url.clone();
+                    }
+                    self.epg_time_offset = entry.epg_time_offset;
+                    self.epg_auto_update = EpgAutoUpdate::from_index(entry.epg_auto_update_index);
+                    self.epg_show_actual_time = entry.epg_show_actual_time;
+                    if !entry.external_player.is_empty() {
+                        self.external_player = entry.external_player.clone();
+                    }
+                    self.buffer_seconds = entry.buffer_seconds;
+                    self.connection_quality = entry.connection_quality;
+                    self.selected_user_agent = entry.selected_user_agent;
+                    self.custom_user_agent = entry.custom_user_agent.clone();
+                    self.use_custom_user_agent = entry.use_custom_user_agent;
+                    self.pass_user_agent_to_player = entry.pass_user_agent_to_player;
+                    self.login();
+                }
             } else {
-                self.auto_login_triggered = true;
+                // Fall back to legacy auto_login behavior
+                if self.save_state && self.auto_login {
+                    if !self.server.is_empty() && !self.username.is_empty() && !self.password.is_empty() {
+                        self.auto_login_triggered = true;
+                        self.login();
+                    } else {
+                        self.auto_login_triggered = true;
+                    }
+                } else {
+                    self.auto_login_triggered = true;
+                }
             }
         }
         
@@ -2184,50 +2474,51 @@ impl eframe::App for IPTVApp {
             ctx.set_visuals(egui::Visuals::light());
         }
 
-        // Top panel - Login controls
+        // Top panel - Controls
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(5.0);
             
             ui.horizontal(|ui| {
-                ui.label("Server:");
-                ui.add(egui::TextEdit::singleline(&mut self.server)
-                    .hint_text("http://server.com:port")
-                    .desired_width(180.0));
-                
-                ui.label("Username:");
-                ui.add(egui::TextEdit::singleline(&mut self.username)
-                    .hint_text("username")
-                    .desired_width(100.0));
-                
-                ui.label("Password:");
-                ui.add(egui::TextEdit::singleline(&mut self.password)
-                    .password(true)
-                    .hint_text("password")
-                    .desired_width(100.0));
-                
-                if ui.button("🔑 Login").clicked() {
-                    self.login();
-                }
-            });
-
-            ui.horizontal(|ui| {
-                if ui.button("📚 Address Book").clicked() {
-                    self.show_address_book = true;
-                }
-                
-                if ui.button("📺 Load Playlist").on_hover_text("Load M3U/M3U8/XSPF playlist URL").clicked() {
-                    self.show_playlist_dialog = true;
+                // Unified Playlists button - primary action
+                let playlist_count = self.playlist_entries.len();
+                let loaded_count = self.playlist_sources.len();
+                let btn_text = if self.logged_in {
+                    // Find current playlist name by reference to avoid clone
+                    let current_name = self.playlist_entries.iter().find(|e| {
+                        matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                            if server == &self.server && username == &self.username)
+                    }).map(|e| e.name.as_str());
+                    
+                    if let Some(name) = current_name {
+                        format!("📺 {} ▼", name)
+                    } else {
+                        format!("📺 {}@{} ▼", self.username, self.server.split('/').nth(2).unwrap_or(&self.server))
+                    }
+                } else if loaded_count > 0 {
+                    format!("📺 Playlists ({}/{})", loaded_count, playlist_count)
+                } else if playlist_count > 0 {
+                    format!("📺 Playlists ({})", playlist_count)
+                } else {
+                    "📺 Playlists".to_string()
+                };
+                if ui.button(btn_text).on_hover_text("Manage playlists - Add Xtream/M3U sources").clicked() {
+                    self.show_playlist_manager = true;
                 }
                 
-                // Show manage button only if playlists are loaded
-                if !self.playlist_sources.is_empty() {
-                    if ui.button(format!("📋 ({})", self.playlist_sources.len()))
-                        .on_hover_text("Manage loaded playlists")
-                        .clicked() 
-                    {
-                        self.show_playlist_manager = true;
+                // Logout button when logged in
+                if self.logged_in {
+                    if ui.button("🚪 Logout").clicked() {
+                        self.logged_in = false;
+                        self.live_categories.clear();
+                        self.movie_categories.clear();
+                        self.series_categories.clear();
+                        self.current_channels.clear();
+                        self.current_series.clear();
+                        self.status_message = "Logged out".to_string();
                     }
                 }
+                
+                ui.separator();
                 
                 if ui.button("🌐 User Agent").clicked() {
                     self.show_user_agent_dialog = true;
@@ -2239,20 +2530,14 @@ impl eframe::App for IPTVApp {
                 
                 ui.separator();
                 
-                ui.checkbox(&mut self.use_post_method, "Use POST");
                 ui.checkbox(&mut self.dark_mode, "🌙 Dark");
                 ui.checkbox(&mut self.single_window_mode, "Single Window")
                     .on_hover_text("Close previous player when opening new stream");
                 
                 ui.separator();
                 
-                ui.checkbox(&mut self.save_state, "💾 Save State")
-                    .on_hover_text("Remember server, username, password, and settings");
-                
-                if self.save_state {
-                    ui.checkbox(&mut self.auto_login, "Auto-Login")
-                        .on_hover_text("Automatically login when app starts");
-                }
+                ui.checkbox(&mut self.save_state, "💾 Auto-Save")
+                    .on_hover_text("Auto-save logins to Playlist Manager");
                 
                 if ui.button("💾 Save").on_hover_text("Save current settings").clicked() {
                     self.save_current_state();
@@ -2392,9 +2677,80 @@ impl eframe::App for IPTVApp {
 
         // Main content
         egui::CentralPanel::default().show(ctx, |ui| {
-            if !self.logged_in {
-                ui.centered_and_justified(|ui| {
-                    ui.heading("Enter credentials and click Login");
+            if !self.logged_in && !self.playlist_mode {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(100.0);
+                    ui.heading("📺 Xtreme IPTV Player");
+                    ui.add_space(20.0);
+                    
+                    let enabled_count = self.playlist_entries.iter().filter(|e| e.enabled).count();
+                    
+                    if enabled_count == 0 {
+                        if self.playlist_entries.is_empty() {
+                            ui.label("Click 'Playlists' to add your first playlist");
+                        } else {
+                            ui.label("All playlists are disabled");
+                            ui.label(egui::RichText::new("Enable playlists in Playlist Manager").weak());
+                        }
+                        ui.add_space(10.0);
+                        if ui.button("📺 Playlist Manager").clicked() {
+                            self.show_playlist_manager = true;
+                        }
+                    } else {
+                        ui.label("Select a playlist to get started:");
+                        ui.add_space(10.0);
+                        
+                        // Show quick access to enabled playlists - use index to avoid clone
+                        let mut to_load_idx: Option<usize> = None;
+                        for (i, entry) in self.playlist_entries.iter().enumerate() {
+                            if !entry.enabled { continue; }
+                            let btn_text = match &entry.entry_type {
+                                PlaylistType::Xtream { .. } => format!("🔑 {}", entry.name),
+                                PlaylistType::M3U { .. } => format!("📺 {}", entry.name),
+                            };
+                            if ui.button(&btn_text).clicked() {
+                                to_load_idx = Some(i);
+                            }
+                        }
+                        
+                        if let Some(idx) = to_load_idx {
+                            let entry = &self.playlist_entries[idx];
+                            match &entry.entry_type {
+                                PlaylistType::Xtream { server, username, password } => {
+                                    self.server = server.clone();
+                                    self.username = username.clone();
+                                    self.password = password.clone();
+                                    if !entry.epg_url.is_empty() {
+                                        self.epg_url_input = entry.epg_url.clone();
+                                    }
+                                    self.epg_time_offset = entry.epg_time_offset;
+                                    self.epg_auto_update = EpgAutoUpdate::from_index(entry.epg_auto_update_index);
+                                    self.epg_show_actual_time = entry.epg_show_actual_time;
+                                    if !entry.external_player.is_empty() {
+                                        self.external_player = entry.external_player.clone();
+                                    }
+                                    self.buffer_seconds = entry.buffer_seconds;
+                                    self.connection_quality = entry.connection_quality;
+                                    self.selected_user_agent = entry.selected_user_agent;
+                                    self.custom_user_agent = entry.custom_user_agent.clone();
+                                    self.use_custom_user_agent = entry.use_custom_user_agent;
+                                    self.pass_user_agent_to_player = entry.pass_user_agent_to_player;
+                                    self.login();
+                                }
+                                PlaylistType::M3U { url } => {
+                                    // Clone before calling mutable method
+                                    let url = url.clone();
+                                    let name = entry.name.clone();
+                                    self.load_playlist_with_name(&url, &name);
+                                }
+                            }
+                        }
+                        
+                        ui.add_space(20.0);
+                        if ui.button("📺 Manage Playlists").clicked() {
+                            self.show_playlist_manager = true;
+                        }
+                    }
                 });
                 return;
             }
@@ -2602,152 +2958,409 @@ impl eframe::App for IPTVApp {
         });
 
         // Address Book Window
-        if self.show_address_book {
-            egui::Window::new("📚 Address Book")
+        // Unified Playlist Manager Window
+        if self.show_playlist_manager {
+            egui::Window::new("📺 Playlist Manager")
                 .collapsible(false)
                 .resizable(true)
-                .min_width(380.0)
+                .min_width(550.0)
                 .show(ctx, |ui| {
-                    // Save current credentials section
-                    ui.heading("Save Current Settings");
+                    // Add new playlist section
+                    ui.heading("Add Playlist");
                     
-                    // Show what will be saved
-                    if !self.server.is_empty() {
-                        ui.label(egui::RichText::new(format!("{}@{}", self.username, self.server)).weak());
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(&mut self.playlist_name_input)
+                            .hint_text("My Playlist")
+                            .desired_width(150.0));
+                    });
                     
-                    let can_save = !self.server.is_empty();
-                    ui.add_enabled_ui(can_save, |ui| {
-                        if ui.button("💾 Save to Address Book").clicked() {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64;
-                            
-                            let cred = SavedCredential {
-                                server: self.server.clone(),
-                                username: self.username.clone(),
-                                password: self.password.clone(),
-                                saved_at: now,
-                                external_player: self.external_player.clone(),
-                                buffer_seconds: self.buffer_seconds,
-                                connection_quality: self.connection_quality,
-                                selected_user_agent: self.selected_user_agent,
-                                custom_user_agent: self.custom_user_agent.clone(),
-                                use_custom_user_agent: self.use_custom_user_agent,
-                                pass_user_agent_to_player: self.pass_user_agent_to_player,
-                                epg_url: self.epg_url_input.clone(),
-                                epg_time_offset: self.epg_time_offset,
-                                epg_auto_update_index: self.epg_auto_update.to_index(),
-                                epg_show_actual_time: self.epg_show_actual_time,
-                            };
-                            
-                            // Update existing or add new
-                            if let Some(existing) = self.address_book.iter_mut().find(|c| c.server == cred.server && c.username == cred.username) {
-                                *existing = cred;
-                            } else {
-                                self.address_book.push(cred);
+                    ui.horizontal(|ui| {
+                        ui.label("URL:");
+                        ui.add(egui::TextEdit::singleline(&mut self.playlist_url_input)
+                            .hint_text("http://server.com/playlist.m3u or Xtream URL")
+                            .desired_width(400.0));
+                    });
+                    
+                    ui.horizontal(|ui| {
+                        // Add as M3U playlist
+                        if ui.button("➕ Add M3U/XSPF").on_hover_text("Add as M3U/M3U8/XSPF playlist").clicked() {
+                            if !self.playlist_url_input.is_empty() {
+                                let name = if self.playlist_name_input.is_empty() {
+                                    self.playlist_url_input.split('/').last()
+                                        .unwrap_or("Playlist")
+                                        .split('?').next()
+                                        .unwrap_or("Playlist")
+                                        .to_string()
+                                } else {
+                                    self.playlist_name_input.clone()
+                                };
+                                
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                
+                                let entry = PlaylistEntry {
+                                    name: name.clone(),
+                                    entry_type: PlaylistType::M3U { url: self.playlist_url_input.clone() },
+                                    saved_at: now,
+                                    enabled: true,
+                                    auto_login: false,
+                                    epg_url: String::new(),
+                                    epg_time_offset: 0.0,
+                                    epg_auto_update_index: 3,
+                                    epg_show_actual_time: false,
+                                    external_player: String::new(),
+                                    buffer_seconds: 5,
+                                    connection_quality: ConnectionQuality::Normal,
+                                    selected_user_agent: 0,
+                                    custom_user_agent: String::new(),
+                                    use_custom_user_agent: false,
+                                    pass_user_agent_to_player: true,
+                                };
+                                
+                                // Add if not duplicate
+                                if !self.playlist_entries.iter().any(|e| {
+                                    matches!(&e.entry_type, PlaylistType::M3U { url } if url == &self.playlist_url_input)
+                                }) {
+                                    self.playlist_entries.push(entry);
+                                    save_playlist_entries(&self.playlist_entries);
+                                    self.status_message = format!("Added playlist '{}'", name);
+                                }
+                                
+                                self.playlist_name_input.clear();
+                                self.playlist_url_input.clear();
                             }
-                            save_address_book(&self.address_book);
-                            self.status_message = "Saved to address book".to_string();
+                        }
+                        
+                        // Add as Xtream
+                        if ui.button("➕ Add Xtream").on_hover_text("Extract Xtream credentials from M3U Plus URL").clicked() {
+                            if !self.playlist_url_input.is_empty() {
+                                // Try to extract Xtream credentials
+                                if let Some((server, username, password)) = Self::parse_xtream_url(&self.playlist_url_input) {
+                                    let name = if self.playlist_name_input.is_empty() {
+                                        format!("{}@{}", username, server.split('/').nth(2).unwrap_or(&server))
+                                    } else {
+                                        self.playlist_name_input.clone()
+                                    };
+                                    
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs() as i64;
+                                    
+                                    let entry = PlaylistEntry {
+                                        name: name.clone(),
+                                        entry_type: PlaylistType::Xtream { server, username, password },
+                                        saved_at: now,
+                                        enabled: true,
+                                        auto_login: false,
+                                        epg_url: String::new(),
+                                        epg_time_offset: 0.0,
+                                        epg_auto_update_index: 3,
+                                        epg_show_actual_time: false,
+                                        external_player: String::new(),
+                                        buffer_seconds: 5,
+                                        connection_quality: ConnectionQuality::Normal,
+                                        selected_user_agent: 0,
+                                        custom_user_agent: String::new(),
+                                        use_custom_user_agent: false,
+                                        pass_user_agent_to_player: true,
+                                    };
+                                    
+                                    // Add if not duplicate
+                                    if !self.playlist_entries.iter().any(|e| {
+                                        matches!(&e.entry_type, PlaylistType::Xtream { server: s, username: u, .. } 
+                                            if matches!(&entry.entry_type, PlaylistType::Xtream { server: s2, username: u2, .. } 
+                                                if s == s2 && u == u2))
+                                    }) {
+                                        self.playlist_entries.push(entry);
+                                        save_playlist_entries(&self.playlist_entries);
+                                        self.status_message = format!("Added Xtream '{}'", name);
+                                    }
+                                    
+                                    self.playlist_name_input.clear();
+                                    self.playlist_url_input.clear();
+                                } else {
+                                    self.status_message = "Could not extract Xtream credentials from URL".to_string();
+                                }
+                            }
+                        }
+                        
+                        // Save current Xtream session
+                        if !self.server.is_empty() && self.logged_in {
+                            if ui.button("💾 Save Current").on_hover_text("Save current Xtream session with all settings").clicked() {
+                                let name = if self.playlist_name_input.is_empty() {
+                                    format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server))
+                                } else {
+                                    self.playlist_name_input.clone()
+                                };
+                                
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                
+                                // Check if entry exists to preserve auto_login and enabled settings
+                                let existing_entry = self.playlist_entries.iter().find(|e| {
+                                    matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                                        if server == &self.server && username == &self.username)
+                                });
+                                let existing_auto_login = existing_entry.map(|e| e.auto_login).unwrap_or(false);
+                                let existing_enabled = existing_entry.map(|e| e.enabled).unwrap_or(true);
+                                
+                                let entry = PlaylistEntry {
+                                    name: name.clone(),
+                                    entry_type: PlaylistType::Xtream {
+                                        server: self.server.clone(),
+                                        username: self.username.clone(),
+                                        password: self.password.clone(),
+                                    },
+                                    saved_at: now,
+                                    enabled: existing_enabled,
+                                    auto_login: existing_auto_login,
+                                    epg_url: self.epg_url_input.clone(),
+                                    epg_time_offset: self.epg_time_offset,
+                                    epg_auto_update_index: self.epg_auto_update.to_index(),
+                                    epg_show_actual_time: self.epg_show_actual_time,
+                                    external_player: self.external_player.clone(),
+                                    buffer_seconds: self.buffer_seconds,
+                                    connection_quality: self.connection_quality,
+                                    selected_user_agent: self.selected_user_agent,
+                                    custom_user_agent: self.custom_user_agent.clone(),
+                                    use_custom_user_agent: self.use_custom_user_agent,
+                                    pass_user_agent_to_player: self.pass_user_agent_to_player,
+                                };
+                                
+                                // Update existing or add new
+                                if let Some(existing) = self.playlist_entries.iter_mut().find(|e| {
+                                    matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                                        if server == &self.server && username == &self.username)
+                                }) {
+                                    *existing = entry;
+                                } else {
+                                    self.playlist_entries.push(entry);
+                                }
+                                save_playlist_entries(&self.playlist_entries);
+                                self.status_message = format!("Saved '{}'", name);
+                                self.playlist_name_input.clear();
+                            }
                         }
                     });
                     
-                    if !can_save {
-                        ui.label(egui::RichText::new("Enter server credentials first").small().weak());
-                    }
-                    
                     ui.separator();
                     
-                    // Saved credentials list
-                    ui.heading("Saved Credentials");
+                    // Saved playlists section
+                    ui.heading("Saved Playlists");
                     
-                    if self.address_book.is_empty() {
-                        ui.label(egui::RichText::new("No saved credentials").weak());
-                    }
-                    
-                    let mut to_delete: Option<usize> = None;
-                    let mut to_load: Option<SavedCredential> = None;
-                    
-                    egui::ScrollArea::vertical()
-                        .max_height(250.0)
-                        .show(ui, |ui| {
-                            for (i, cred) in self.address_book.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    // Load button
-                                    if ui.button("▶").on_hover_text("Load credentials").clicked() {
-                                        to_load = Some(cred.clone());
-                                    }
-                                    
-                                    // Server info and saved date
-                                    ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new(format!("{}@{}", cred.username, cred.server)).strong());
-                                        // Format saved_at timestamp
-                                        let saved_str = if cred.saved_at > 0 {
-                                            Self::format_datetime(cred.saved_at)
-                                        } else {
-                                            "Unknown".to_string()
-                                        };
-                                        ui.label(egui::RichText::new(format!("Saved: {}", saved_str)).small().weak());
-                                    });
-                                    
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("🗑").on_hover_text("Delete").clicked() {
-                                            to_delete = Some(i);
-                                        }
-                                    });
-                                });
-                                ui.separator();
-                            }
-                        });
-                    
-                    if let Some(cred) = to_load {
-                        let cred_label = format!("{}@{}", cred.username, cred.server);
-                        // Server credentials
-                        self.server = cred.server;
-                        self.username = cred.username;
-                        self.password = cred.password;
-                        // Player settings
-                        self.external_player = cred.external_player;
-                        self.buffer_seconds = cred.buffer_seconds;
-                        self.connection_quality = cred.connection_quality;
-                        // User agent settings
-                        self.selected_user_agent = cred.selected_user_agent;
-                        self.custom_user_agent = cred.custom_user_agent;
-                        self.use_custom_user_agent = cred.use_custom_user_agent;
-                        self.pass_user_agent_to_player = cred.pass_user_agent_to_player;
-                        // EPG settings
-                        self.epg_url_input = cred.epg_url;
-                        self.epg_time_offset = cred.epg_time_offset;
-                        self.epg_auto_update = EpgAutoUpdate::from_index(cred.epg_auto_update_index);
-                        self.epg_show_actual_time = cred.epg_show_actual_time;
-                        // Clear EPG data since we're loading new provider
-                        self.epg_data = None;
-                        self.epg_last_update = None;
-                        self.epg_startup_loaded = false; // Allow auto-load for new provider
+                    if self.playlist_entries.is_empty() {
+                        ui.label(egui::RichText::new("No saved playlists").weak());
+                    } else {
+                        let mut to_delete: Option<usize> = None;
+                        let mut to_load_xtream_idx: Option<usize> = None;
+                        let mut to_load_m3u: Option<(String, String)> = None; // url, name
+                        let mut to_toggle_auto_login: Option<usize> = None;
+                        let mut to_toggle_enabled: Option<usize> = None;
                         
-                        self.status_message = format!("Loaded '{}'", cred_label);
-                        self.show_address_book = false;
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .show(ui, |ui| {
+                                for (i, entry) in self.playlist_entries.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        match &entry.entry_type {
+                                            PlaylistType::Xtream { .. } => {
+                                                // Enabled toggle
+                                                let enabled_text = if entry.enabled { "✓" } else { "○" };
+                                                let enabled_color = if entry.enabled { egui::Color32::from_rgb(100, 200, 100) } else { egui::Color32::GRAY };
+                                                if ui.button(egui::RichText::new(enabled_text).color(enabled_color))
+                                                    .on_hover_text(if entry.enabled { "Enabled - click to disable" } else { "Disabled - click to enable" })
+                                                    .clicked() 
+                                                {
+                                                    to_toggle_enabled = Some(i);
+                                                }
+                                                
+                                                // Play button (only if enabled)
+                                                if entry.enabled {
+                                                    if ui.button("▶").on_hover_text("Login to this Xtream server").clicked() {
+                                                        to_load_xtream_idx = Some(i);
+                                                    }
+                                                }
+                                                ui.label("🔑");
+                                                let name_text = if entry.enabled {
+                                                    egui::RichText::new(&entry.name).strong()
+                                                } else {
+                                                    egui::RichText::new(&entry.name).weak().strikethrough()
+                                                };
+                                                ui.label(name_text);
+                                            }
+                                            PlaylistType::M3U { url } => {
+                                                // Enabled toggle
+                                                let enabled_text = if entry.enabled { "✓" } else { "○" };
+                                                let enabled_color = if entry.enabled { egui::Color32::from_rgb(100, 200, 100) } else { egui::Color32::GRAY };
+                                                if ui.button(egui::RichText::new(enabled_text).color(enabled_color))
+                                                    .on_hover_text(if entry.enabled { "Enabled - click to disable" } else { "Disabled - click to enable" })
+                                                    .clicked() 
+                                                {
+                                                    to_toggle_enabled = Some(i);
+                                                }
+                                                
+                                                // Play button (only if enabled)
+                                                if entry.enabled {
+                                                    if ui.button("▶").on_hover_text("Load this playlist").clicked() {
+                                                        to_load_m3u = Some((url.clone(), entry.name.clone()));
+                                                    }
+                                                }
+                                                ui.label("📺");
+                                                let name_text = if entry.enabled {
+                                                    egui::RichText::new(&entry.name).strong()
+                                                } else {
+                                                    egui::RichText::new(&entry.name).weak().strikethrough()
+                                                };
+                                                ui.label(name_text);
+                                            }
+                                        }
+                                        
+                                        // Auto-login toggle for Xtream entries (only if enabled)
+                                        if entry.enabled && matches!(entry.entry_type, PlaylistType::Xtream { .. }) {
+                                            let auto_text = if entry.auto_login { "🔄" } else { "⏸" };
+                                            let hover = if entry.auto_login { "Auto-login ON - click to disable" } else { "Auto-login OFF - click to enable" };
+                                            if ui.button(egui::RichText::new(auto_text).size(14.0)).on_hover_text(hover).clicked() {
+                                                to_toggle_auto_login = Some(i);
+                                            }
+                                        }
+                                        
+                                        // Saved date
+                                        if entry.saved_at > 0 {
+                                            ui.label(egui::RichText::new(Self::format_datetime(entry.saved_at)).small().weak());
+                                        }
+                                        
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button("🗑").on_hover_text("Delete").clicked() {
+                                                to_delete = Some(i);
+                                            }
+                                        });
+                                    });
+                                    ui.separator();
+                                }
+                            });
+                        
+                        // Handle enabled toggle
+                        if let Some(i) = to_toggle_enabled {
+                            self.playlist_entries[i].enabled = !self.playlist_entries[i].enabled;
+                            // If disabling, also disable auto-login
+                            if !self.playlist_entries[i].enabled {
+                                self.playlist_entries[i].auto_login = false;
+                            }
+                            save_playlist_entries(&self.playlist_entries);
+                        }
+                        
+                        // Handle auto-login toggle
+                        if let Some(i) = to_toggle_auto_login {
+                            self.playlist_entries[i].auto_login = !self.playlist_entries[i].auto_login;
+                            save_playlist_entries(&self.playlist_entries);
+                        }
+                        
+                        // Handle actions
+                        if let Some(idx) = to_load_xtream_idx {
+                            let entry = &self.playlist_entries[idx];
+                            if let PlaylistType::Xtream { server, username, password } = &entry.entry_type {
+                                // Server credentials
+                                self.server = server.clone();
+                                self.username = username.clone();
+                                self.password = password.clone();
+                                // EPG settings
+                                if !entry.epg_url.is_empty() {
+                                    self.epg_url_input = entry.epg_url.clone();
+                                }
+                                self.epg_time_offset = entry.epg_time_offset;
+                                self.epg_auto_update = EpgAutoUpdate::from_index(entry.epg_auto_update_index);
+                                self.epg_show_actual_time = entry.epg_show_actual_time;
+                                // Clear EPG data for new provider
+                                self.epg_data = None;
+                                self.epg_last_update = None;
+                                self.epg_startup_loaded = false;
+                                // Player settings
+                                if !entry.external_player.is_empty() {
+                                    self.external_player = entry.external_player.clone();
+                                }
+                                self.buffer_seconds = entry.buffer_seconds;
+                                self.connection_quality = entry.connection_quality;
+                                // User agent settings
+                                self.selected_user_agent = entry.selected_user_agent;
+                                self.custom_user_agent = entry.custom_user_agent.clone();
+                                self.use_custom_user_agent = entry.use_custom_user_agent;
+                                self.pass_user_agent_to_player = entry.pass_user_agent_to_player;
+                                
+                                self.show_playlist_manager = false;
+                                self.login();
+                            }
+                        }
+                        
+                        if let Some((url, name)) = to_load_m3u {
+                            self.load_playlist_with_name(&url, &name);
+                            self.show_playlist_manager = false;
+                        }
+                        
+                        if let Some(i) = to_delete {
+                            let entry = &self.playlist_entries[i];
+                            let name = entry.name.clone();
+                            
+                            // Remove related favorites/recent for M3U playlists
+                            if matches!(entry.entry_type, PlaylistType::M3U { .. }) {
+                                self.favorites.retain(|f| f.playlist_source.as_ref() != Some(&name));
+                                self.recent_watched.retain(|f| f.playlist_source.as_ref() != Some(&name));
+                                self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
+                                self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
+                                self.config.save();
+                            }
+                            
+                            self.playlist_entries.remove(i);
+                            save_playlist_entries(&self.playlist_entries);
+                            self.status_message = format!("Removed '{}'", name);
+                        }
                     }
                     
-                    if let Some(i) = to_delete {
-                        let cred = &self.address_book[i];
-                        let cred_label = format!("{}@{}", cred.username, cred.server);
-                        self.address_book.remove(i);
-                        save_address_book(&self.address_book);
-                        self.status_message = format!("Removed '{}'", cred_label);
+                    // Currently loaded playlists
+                    if !self.playlist_sources.is_empty() {
+                        ui.separator();
+                        ui.heading("Currently Loaded");
+                        
+                        let mut to_unload: Option<usize> = None;
+                        
+                        let playlist_infos: Vec<_> = self.playlist_sources.iter().enumerate().map(|(i, (start_idx, name))| {
+                            let end_idx = self.playlist_sources.get(i + 1)
+                                .map(|(next_start, _)| *next_start)
+                                .unwrap_or(self.current_channels.len());
+                            (i, name.clone(), end_idx - start_idx)
+                        }).collect();
+                        
+                        for (idx, name, count) in &playlist_infos {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("📺 {} ({} channels)", name, count));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("✕").on_hover_text("Unload").clicked() {
+                                        to_unload = Some(*idx);
+                                    }
+                                });
+                            });
+                        }
+                        
+                        if let Some(idx) = to_unload {
+                            self.unload_playlist(idx);
+                        }
                     }
                     
                     ui.separator();
                     
                     ui.horizontal(|ui| {
                         if ui.button("Close").clicked() {
-                            self.show_address_book = false;
+                            self.show_playlist_manager = false;
                         }
                         
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(egui::RichText::new("⚠ Reset All Settings").color(egui::Color32::from_rgb(200, 80, 80)))
-                                .on_hover_text("Clear all settings, favorites, and recent history")
+                            if ui.button(egui::RichText::new("⚠ Reset All").color(egui::Color32::from_rgb(200, 80, 80)))
+                                .on_hover_text("Clear all settings, playlists, favorites")
                                 .clicked() 
                             {
                                 self.show_reset_confirm = true;
@@ -2770,7 +3383,7 @@ impl eframe::App for IPTVApp {
                     
                     ui.label("This will permanently delete:");
                     ui.label("  • Server credentials");
-                    ui.label("  • Address book entries");
+                    ui.label("  • Saved playlists");
                     ui.label("  • Favorites");
                     ui.label("  • Recent watch history");
                     ui.label("  • EPG settings");
@@ -2788,188 +3401,13 @@ impl eframe::App for IPTVApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button(egui::RichText::new("Reset Everything").color(egui::Color32::from_rgb(200, 80, 80))).clicked() {
                                 self.reset_to_defaults();
+                                self.playlist_entries.clear();
+                                save_playlist_entries(&self.playlist_entries);
                                 self.show_reset_confirm = false;
-                                self.show_address_book = false;
+                                self.show_playlist_manager = false;
                                 self.status_message = "All settings have been reset".to_string();
                             }
                         });
-                    });
-                });
-        }
-
-        // Playlist URL Dialog (M3U/M3U8/XSPF)
-        if self.show_playlist_dialog {
-            egui::Window::new("📺 Load Playlist")
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label("Enter playlist URL:");
-                    ui.add(egui::TextEdit::singleline(&mut self.playlist_url_input)
-                        .hint_text("http://example.com/playlist.m3u8 or Xtream M3U URL")
-                        .desired_width(500.0));
-                    
-                    ui.add_space(8.0);
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("▶ Load Playlist").on_hover_text("Load as M3U/M3U8/XSPF playlist (appends to existing)").clicked() {
-                            if !self.playlist_url_input.is_empty() {
-                                let url = self.playlist_url_input.clone();
-                                self.load_playlist(&url);
-                            }
-                            self.show_playlist_dialog = false;
-                        }
-                        
-                        if ui.button("🔑 Extract & Login").on_hover_text("Extract Xtream credentials from M3U Plus URL").clicked() {
-                            if !self.playlist_url_input.is_empty() {
-                                self.extract_m3u_credentials(&self.playlist_url_input.clone());
-                                self.show_playlist_dialog = false;
-                                self.login();
-                            }
-                        }
-                        
-                        if ui.button("Cancel").clicked() {
-                            self.show_playlist_dialog = false;
-                        }
-                    });
-                    
-                    // Show current playlist status and clear button
-                    if !self.playlist_sources.is_empty() {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Loaded: {} playlist(s), {} channels", 
-                                self.playlist_sources.len(), 
-                                self.current_channels.len()));
-                            if ui.button("🗑 Clear All").on_hover_text("Remove all loaded playlists").clicked() {
-                                self.current_channels.clear();
-                                self.playlist_sources.clear();
-                                self.playlist_mode = false;
-                                self.status_message = "Playlists cleared".to_string();
-                            }
-                        });
-                    }
-                    
-                    ui.separator();
-                    ui.label("▶ Load Playlist: M3U, M3U8/HLS, XSPF files (can load multiple)");
-                    ui.label("🔑 Extract & Login: Xtream M3U Plus URLs with username/password");
-                });
-        }
-
-        // Playlist Manager Window
-        if self.show_playlist_manager {
-            egui::Window::new("📋 Manage Playlists")
-                .collapsible(false)
-                .resizable(true)
-                .min_width(400.0)
-                .show(ctx, |ui| {
-                    ui.heading("Loaded Playlists");
-                    ui.separator();
-                    
-                    if self.playlist_sources.is_empty() {
-                        ui.label("No playlists loaded");
-                    } else {
-                        let mut to_remove: Option<usize> = None;
-                        
-                        // Calculate channel counts per playlist
-                        let playlist_infos: Vec<_> = self.playlist_sources.iter().enumerate().map(|(i, (start_idx, name))| {
-                            let end_idx = self.playlist_sources.get(i + 1)
-                                .map(|(next_start, _)| *next_start)
-                                .unwrap_or(self.current_channels.len());
-                            let count = end_idx - start_idx;
-                            (i, name.clone(), *start_idx, end_idx, count)
-                        }).collect();
-                        
-                        for (idx, name, _start, _end, count) in &playlist_infos {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("📺 {} ({} channels)", name, count));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("🗑").on_hover_text("Remove this playlist and related favorites/recent").clicked() {
-                                        to_remove = Some(*idx);
-                                    }
-                                });
-                            });
-                            ui.separator();
-                        }
-                        
-                        // Handle removal
-                        if let Some(idx) = to_remove {
-                            if let Some((_, name, start_idx, end_idx, _)) = playlist_infos.get(idx) {
-                                let playlist_name = name.clone();
-                                let channels_to_remove = end_idx - start_idx;
-                                
-                                // Remove channels from current_channels
-                                if *start_idx < self.current_channels.len() {
-                                    let actual_end = (*end_idx).min(self.current_channels.len());
-                                    self.current_channels.drain(*start_idx..actual_end);
-                                }
-                                
-                                // Remove from playlist_sources
-                                self.playlist_sources.remove(idx);
-                                
-                                // Update start indices for remaining playlists
-                                for (start, _) in self.playlist_sources.iter_mut().skip(idx) {
-                                    *start = start.saturating_sub(channels_to_remove);
-                                }
-                                
-                                // Remove related favorites
-                                self.favorites.retain(|f| {
-                                    f.playlist_source.as_ref() != Some(&playlist_name)
-                                });
-                                self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
-                                
-                                // Remove related recent
-                                self.recent_watched.retain(|f| {
-                                    f.playlist_source.as_ref() != Some(&playlist_name)
-                                });
-                                self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
-                                
-                                self.config.save();
-                                
-                                // Update playlist mode
-                                if self.playlist_sources.is_empty() {
-                                    self.playlist_mode = false;
-                                    self.current_channels.clear();
-                                }
-                                
-                                self.status_message = format!("Removed playlist '{}' and {} related items", playlist_name, channels_to_remove);
-                            }
-                        }
-                    }
-                    
-                    ui.add_space(8.0);
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("Close").clicked() {
-                            self.show_playlist_manager = false;
-                        }
-                        
-                        if !self.playlist_sources.is_empty() {
-                            if ui.button("🗑 Clear All").on_hover_text("Remove all playlists").clicked() {
-                                // Get all playlist names to remove from favorites/recent
-                                let playlist_names: Vec<_> = self.playlist_sources.iter()
-                                    .map(|(_, name)| name.clone())
-                                    .collect();
-                                
-                                self.current_channels.clear();
-                                self.playlist_sources.clear();
-                                self.playlist_mode = false;
-                                
-                                // Remove related favorites
-                                self.favorites.retain(|f| {
-                                    f.playlist_source.as_ref().map_or(true, |src| !playlist_names.contains(src))
-                                });
-                                self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
-                                
-                                // Remove related recent
-                                self.recent_watched.retain(|f| {
-                                    f.playlist_source.as_ref().map_or(true, |src| !playlist_names.contains(src))
-                                });
-                                self.config.recent_watched_json = serde_json::to_string(&self.recent_watched).unwrap_or_default();
-                                
-                                self.config.save();
-                                self.status_message = "All playlists cleared".to_string();
-                                self.show_playlist_manager = false;
-                            }
-                        }
                     });
                 });
         }
