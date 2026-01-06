@@ -42,13 +42,17 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-/// Get current time as HH:MM:SS (UTC)
-fn timestamp_now() -> String {
-    let now = std::time::SystemTime::now()
+/// Get current Unix timestamp in seconds
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let secs = now % 86400;
+        .as_secs() as i64
+}
+
+/// Get current time as HH:MM:SS (UTC)
+fn timestamp_now() -> String {
+    let secs = unix_timestamp() as u64 % 86400;
     format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
@@ -714,10 +718,7 @@ impl IPTVApp {
             
             // Also save to playlist_entries if this is an Xtream server
             if !self.server.is_empty() && !self.username.is_empty() {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
+                let now = unix_timestamp();
                 
                 // Create playlist entry with all current settings
                 let entry = PlaylistEntry {
@@ -1428,10 +1429,7 @@ impl IPTVApp {
     /// Get adjusted "now" timestamp accounting for EPG time offset
     fn get_adjusted_now(&self) -> i64 {
         let offset_secs = (self.epg_time_offset * 3600.0) as i64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = unix_timestamp();
         now - offset_secs
     }
     
@@ -2312,10 +2310,7 @@ impl eframe::App for IPTVApp {
                     
                     // Auto-save to playlist_entries if save_state is enabled
                     if self.save_state && !self.server.is_empty() && !self.username.is_empty() {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
+                        let now = unix_timestamp();
                         
                         let entry = PlaylistEntry {
                             name: format!("{}@{}", self.username, self.server.split('/').nth(2).unwrap_or(&self.server)),
@@ -2389,10 +2384,7 @@ impl eframe::App for IPTVApp {
                             
                             // Check if cache is stale and needs refresh
                             if let Some(interval_secs) = self.epg_auto_update.as_secs() {
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
+                                let now = unix_timestamp();
                                 
                                 if epg_last_updated > 0 && (now - epg_last_updated) >= interval_secs {
                                     self.log(&format!("[INFO] EPG cache is stale (last updated {} hours ago), will refresh", 
@@ -2501,10 +2493,7 @@ impl eframe::App for IPTVApp {
                     }
                     self.log("[INFO] =========================================");
                     
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
+                    let now = unix_timestamp();
                     
                     // Save EPG cache to disk for persistence across restarts
                     if !self.server.is_empty() && !self.username.is_empty() {
@@ -2561,10 +2550,7 @@ impl eframe::App for IPTVApp {
                     
                     // Check if this playlist needs immediate auto-update (time elapsed while app was closed)
                     if let Some(playlist_name) = playlist_name {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
+                        let now = unix_timestamp();
                         
                         if let Some((idx, entry)) = self.playlist_entries.iter().enumerate()
                             .find(|(_, e)| e.name == playlist_name && e.enabled && e.auto_update_days > 0)
@@ -2625,10 +2611,7 @@ impl eframe::App for IPTVApp {
         
         // EPG UI refresh every 5 minutes (to update current program, time remaining, etc.)
         if self.epg_data.is_some() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let now = unix_timestamp();
             
             if now - self.epg_last_ui_refresh >= 300 { // 5 minutes = 300 seconds
                 self.epg_last_ui_refresh = now;
@@ -2687,10 +2670,7 @@ impl eframe::App for IPTVApp {
         
         // === Auto-update checks (EPG and Playlist) ===
         // Throttle to once per minute - no need to check "has 4 hours passed?" 60 times/second
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = unix_timestamp();
         
         if (now - self.last_auto_update_check) >= 60 {
             self.last_auto_update_check = now;
@@ -3278,10 +3258,7 @@ impl eframe::App for IPTVApp {
                                     self.playlist_name_input.clone()
                                 };
                                 
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
+                                let now = unix_timestamp();
                                 
                                 let entry = PlaylistEntry {
                                     name: name.clone(),
@@ -3330,10 +3307,7 @@ impl eframe::App for IPTVApp {
                                         self.playlist_name_input.clone()
                                     };
                                     
-                                    let now = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs() as i64;
+                                    let now = unix_timestamp();
                                     
                                     let entry = PlaylistEntry {
                                         name: name.clone(),
@@ -3385,10 +3359,7 @@ impl eframe::App for IPTVApp {
                                     self.playlist_name_input.clone()
                                 };
                                 
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
+                                let now = unix_timestamp();
                                 
                                 // Check if entry exists to preserve auto_login, enabled, and auto_update settings
                                 let existing_entry = self.playlist_entries.iter().find(|e| {
@@ -3593,10 +3564,7 @@ impl eframe::App for IPTVApp {
                             self.playlist_entries[i].auto_update_days = days;
                             // Reset last_updated when enabling to prevent immediate update
                             if days > 0 && self.playlist_entries[i].last_updated == 0 {
-                                self.playlist_entries[i].last_updated = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
+                                self.playlist_entries[i].last_updated = unix_timestamp();
                             }
                             save_playlist_entries(&self.playlist_entries);
                         }
@@ -3647,10 +3615,7 @@ impl eframe::App for IPTVApp {
                         if let Some(idx) = to_reload {
                             let entry = &self.playlist_entries[idx];
                             let name = entry.name.clone();
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64;
+                            let now = unix_timestamp();
                             
                             match &entry.entry_type {
                                 PlaylistType::M3U { url } => {
@@ -3920,10 +3885,7 @@ impl eframe::App for IPTVApp {
                         
                         // Show last update time
                         if let Some(last) = self.epg_last_update {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64;
+                            let now = unix_timestamp();
                             let ago = now - last;
                             let ago_str = if ago < 3600 {
                                 format!("{}m ago", ago / 60)
