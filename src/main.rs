@@ -426,6 +426,7 @@ struct IPTVApp {
     config: AppConfig,
     address_book: Vec<SavedCredential>, // Legacy - kept for migration
     playlist_entries: Vec<PlaylistEntry>, // New unified playlist manager
+    current_playlist_idx: Option<usize>, // Cached index of current Xtream playlist (avoids repeated lookups)
     show_playlist_manager: bool,
     playlist_name_input: String,
     playlist_url_input: String,
@@ -608,6 +609,7 @@ impl IPTVApp {
             config,
             address_book,
             playlist_entries,
+            current_playlist_idx: None,
             show_playlist_manager: false,
             playlist_name_input: String::new(),
             playlist_url_input: String::new(),
@@ -647,6 +649,39 @@ impl IPTVApp {
         if self.console_log.len() > 500 {
             self.console_log.remove(0);
         }
+    }
+    
+    /// Find the index of the current Xtream playlist entry (caches result)
+    fn find_current_playlist_idx(&mut self) -> Option<usize> {
+        // Return cached index if still valid
+        if let Some(idx) = self.current_playlist_idx {
+            if idx < self.playlist_entries.len() {
+                if let PlaylistType::Xtream { server, username, .. } = &self.playlist_entries[idx].entry_type {
+                    if server == &self.server && username == &self.username {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        
+        // Search and cache
+        let idx = self.playlist_entries.iter().position(|e| {
+            matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
+                if server == &self.server && username == &self.username)
+        });
+        self.current_playlist_idx = idx;
+        idx
+    }
+    
+    /// Get reference to current playlist entry
+    fn current_playlist_entry(&mut self) -> Option<&PlaylistEntry> {
+        let idx = self.find_current_playlist_idx()?;
+        self.playlist_entries.get(idx)
+    }
+    
+    /// Clear cached playlist index (call when switching playlists or modifying entries)
+    fn invalidate_playlist_cache(&mut self) {
+        self.current_playlist_idx = None;
     }
     
     fn save_current_state(&mut self) {
@@ -2341,11 +2376,11 @@ impl eframe::App for IPTVApp {
                             self.epg_data = Some(Box::new(cached_epg));
                             self.epg_status = format!("Cached: {} channels, {} programs", channel_count, program_count);
                             
-                            // Get persistent epg_last_updated from playlist entry
-                            let epg_last_updated = self.playlist_entries.iter().find(|e| {
-                                matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
-                                    if server == &self.server && username == &self.username)
-                            }).map(|e| e.epg_last_updated).unwrap_or(0);
+                            // Get persistent epg_last_updated using cached lookup
+                            let epg_last_updated = self.find_current_playlist_idx()
+                                .and_then(|idx| self.playlist_entries.get(idx))
+                                .map(|e| e.epg_last_updated)
+                                .unwrap_or(0);
                             
                             // Set in-memory timestamp from persistent storage
                             if epg_last_updated > 0 {
@@ -2484,11 +2519,8 @@ impl eframe::App for IPTVApp {
                     self.epg_status = format!("Loaded {} channels, {} programs", channel_count, program_count);
                     
                     // Save epg_last_updated to playlist entry for persistence
-                    if let Some(entry) = self.playlist_entries.iter_mut().find(|e| {
-                        matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
-                            if server == &self.server && username == &self.username)
-                    }) {
-                        entry.epg_last_updated = now;
+                    if let Some(idx) = self.find_current_playlist_idx() {
+                        self.playlist_entries[idx].epg_last_updated = now;
                         save_playlist_entries(&self.playlist_entries);
                     }
                 }
@@ -2613,6 +2645,7 @@ impl eframe::App for IPTVApp {
             
             if let Some(idx) = auto_login_idx {
                 self.auto_login_triggered = true;
+                self.current_playlist_idx = Some(idx); // Cache the index
                 let entry = &self.playlist_entries[idx];
                 if let PlaylistType::Xtream { server, username, password } = &entry.entry_type {
                     // Load settings from entry
@@ -2641,6 +2674,7 @@ impl eframe::App for IPTVApp {
                 if self.save_state && self.auto_login {
                     if !self.server.is_empty() && !self.username.is_empty() && !self.password.is_empty() {
                         self.auto_login_triggered = true;
+                        self.invalidate_playlist_cache(); // Will be found on first lookup
                         self.login();
                     } else {
                         self.auto_login_triggered = true;
@@ -2664,11 +2698,11 @@ impl eframe::App for IPTVApp {
             // EPG auto-update check (periodic refresh) - only when logged in and interval elapsed
             if self.logged_in && !self.epg_loading && !self.epg_url_input.is_empty() {
                 if let Some(interval_secs) = self.epg_auto_update.as_secs() {
-                    // Get persistent epg_last_updated from playlist entry if available
-                    let persistent_last_update = self.playlist_entries.iter().find(|e| {
-                        matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
-                            if server == &self.server && username == &self.username)
-                    }).map(|e| e.epg_last_updated).unwrap_or(0);
+                    // Get persistent epg_last_updated from cached playlist entry
+                    let persistent_last_update = self.find_current_playlist_idx()
+                        .and_then(|idx| self.playlist_entries.get(idx))
+                        .map(|e| e.epg_last_updated)
+                        .unwrap_or(0);
                     
                     // Use in-memory timestamp if set, otherwise use persistent
                     let last_update = self.epg_last_update.unwrap_or(persistent_last_update);
@@ -2731,11 +2765,10 @@ impl eframe::App for IPTVApp {
                 let playlist_count = self.playlist_entries.len();
                 let loaded_count = self.playlist_sources.len();
                 let btn_text = if self.logged_in {
-                    // Find current playlist name by reference to avoid clone
-                    let current_name = self.playlist_entries.iter().find(|e| {
-                        matches!(&e.entry_type, PlaylistType::Xtream { server, username, .. } 
-                            if server == &self.server && username == &self.username)
-                    }).map(|e| e.name.as_str());
+                    // Use cached index to find current playlist name
+                    let current_name = self.find_current_playlist_idx()
+                        .and_then(|idx| self.playlist_entries.get(idx))
+                        .map(|e| e.name.as_str());
                     
                     if let Some(name) = current_name {
                         format!("📺 {} ▼  ", name)
@@ -2762,6 +2795,7 @@ impl eframe::App for IPTVApp {
                         self.series_categories.clear();
                         self.current_channels.clear();
                         self.current_series.clear();
+                        self.invalidate_playlist_cache();
                         self.status_message = "Logged out".to_string();
                     }
                 }
@@ -3573,6 +3607,7 @@ impl eframe::App for IPTVApp {
                         
                         // Handle actions
                         if let Some(idx) = to_load_xtream_idx {
+                            self.current_playlist_idx = Some(idx); // Cache the index
                             let entry = &self.playlist_entries[idx];
                             if let PlaylistType::Xtream { server, username, password } = &entry.entry_type {
                                 // Server credentials
@@ -3626,6 +3661,7 @@ impl eframe::App for IPTVApp {
                             }
                             
                             self.playlist_entries.remove(i);
+                            self.invalidate_playlist_cache(); // Index may have shifted
                             save_playlist_entries(&self.playlist_entries);
                             self.status_message = format!("Removed '{}'", name);
                         }
