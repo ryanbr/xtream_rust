@@ -3457,120 +3457,116 @@ impl eframe::App for IPTVApp {
                         let mut to_toggle_auto_login: Option<usize> = None;
                         let mut to_toggle_enabled: Option<usize> = None;
                         let mut to_change_auto_update: Option<(usize, u8)> = None; // (index, new_days)
+                        let mut to_reload: Option<usize> = None; // index of playlist to reload
                         
                         egui::ScrollArea::vertical()
-                            .max_height(200.0)
+                            .max_height(250.0)
                             .show(ui, |ui| {
                                 for (i, entry) in self.playlist_entries.iter().enumerate() {
-                                    ui.horizontal(|ui| {
-                                        match &entry.entry_type {
-                                            PlaylistType::Xtream { .. } => {
-                                                // Enabled toggle
-                                                let enabled_text = if entry.enabled { "✓" } else { "○" };
-                                                let enabled_color = if entry.enabled { egui::Color32::from_rgb(100, 200, 100) } else { egui::Color32::GRAY };
-                                                if ui.button(egui::RichText::new(enabled_text).color(enabled_color))
-                                                    .on_hover_text(if entry.enabled { "Enabled - click to disable" } else { "Disabled - click to enable" })
-                                                    .clicked() 
-                                                {
-                                                    to_toggle_enabled = Some(i);
-                                                }
-                                                
-                                                // Play button (only if enabled)
-                                                if entry.enabled {
-                                                    if ui.button("▶").on_hover_text("Login to this Xtream server").clicked() {
-                                                        to_load_xtream_idx = Some(i);
+                                    ui.vertical(|ui| {
+                                        // Line 1: Enable, Play, Icon, Name, Delete, Reload
+                                        ui.horizontal(|ui| {
+                                            // Enabled toggle
+                                            let enabled_text = if entry.enabled { "✓" } else { "○" };
+                                            let enabled_color = if entry.enabled { egui::Color32::from_rgb(100, 200, 100) } else { egui::Color32::GRAY };
+                                            if ui.button(egui::RichText::new(enabled_text).color(enabled_color))
+                                                .on_hover_text(if entry.enabled { "Enabled - click to disable" } else { "Disabled - click to enable" })
+                                                .clicked() 
+                                            {
+                                                to_toggle_enabled = Some(i);
+                                            }
+                                            
+                                            match &entry.entry_type {
+                                                PlaylistType::Xtream { .. } => {
+                                                    if entry.enabled {
+                                                        if ui.button("▶").on_hover_text("Login to this Xtream server").clicked() {
+                                                            to_load_xtream_idx = Some(i);
+                                                        }
                                                     }
+                                                    ui.label("🔑");
                                                 }
-                                                ui.label("🔑");
-                                                let name_text = if entry.enabled {
-                                                    egui::RichText::new(&entry.name).strong()
-                                                } else {
-                                                    egui::RichText::new(&entry.name).weak().strikethrough()
-                                                };
-                                                ui.label(name_text);
-                                            }
-                                            PlaylistType::M3U { url } => {
-                                                // Enabled toggle
-                                                let enabled_text = if entry.enabled { "✓" } else { "○" };
-                                                let enabled_color = if entry.enabled { egui::Color32::from_rgb(100, 200, 100) } else { egui::Color32::GRAY };
-                                                if ui.button(egui::RichText::new(enabled_text).color(enabled_color))
-                                                    .on_hover_text(if entry.enabled { "Enabled - click to disable" } else { "Disabled - click to enable" })
-                                                    .clicked() 
-                                                {
-                                                    to_toggle_enabled = Some(i);
-                                                }
-                                                
-                                                // Play button (only if enabled)
-                                                if entry.enabled {
-                                                    if ui.button("▶").on_hover_text("Load this playlist").clicked() {
-                                                        to_load_m3u = Some((url.clone(), entry.name.clone()));
+                                                PlaylistType::M3U { url } => {
+                                                    if entry.enabled {
+                                                        if ui.button("▶").on_hover_text("Load this playlist").clicked() {
+                                                            to_load_m3u = Some((url.clone(), entry.name.clone()));
+                                                        }
                                                     }
+                                                    ui.label("📺");
                                                 }
-                                                ui.label("📺");
-                                                let name_text = if entry.enabled {
-                                                    egui::RichText::new(&entry.name).strong()
-                                                } else {
-                                                    egui::RichText::new(&entry.name).weak().strikethrough()
-                                                };
-                                                ui.label(name_text);
                                             }
-                                        }
-                                        
-                                        // Auto-login toggle for Xtream entries (only if enabled)
-                                        if entry.enabled && matches!(entry.entry_type, PlaylistType::Xtream { .. }) {
-                                            let auto_text = if entry.auto_login { "🔄" } else { "⏸" };
-                                            let hover = if entry.auto_login { "Auto-login ON - click to disable" } else { "Auto-login OFF - click to enable" };
-                                            if ui.button(egui::RichText::new(auto_text).size(14.0)).on_hover_text(hover).clicked() {
-                                                to_toggle_auto_login = Some(i);
-                                            }
-                                        }
-                                        
-                                        // Auto-update dropdown (for enabled entries)
-                                        if entry.enabled {
-                                            let update_text = match entry.auto_update_days {
-                                                0 => "⏰Off",
-                                                1 => "⏰1d",
-                                                2 => "⏰2d",
-                                                3 => "⏰3d",
-                                                4 => "⏰4d",
-                                                5 => "⏰5d",
-                                                _ => "⏰?",
+                                            
+                                            let name_text = if entry.enabled {
+                                                egui::RichText::new(&entry.name).strong()
+                                            } else {
+                                                egui::RichText::new(&entry.name).weak().strikethrough()
                                             };
-                                            egui::ComboBox::from_id_salt(format!("auto_update_{}", i))
-                                                .selected_text(update_text)
-                                                .width(55.0)
-                                                .show_ui(ui, |ui| {
-                                                    if ui.selectable_label(entry.auto_update_days == 0, "Off").clicked() {
-                                                        to_change_auto_update = Some((i, 0));
-                                                    }
-                                                    if ui.selectable_label(entry.auto_update_days == 1, "1 day").clicked() {
-                                                        to_change_auto_update = Some((i, 1));
-                                                    }
-                                                    if ui.selectable_label(entry.auto_update_days == 2, "2 days").clicked() {
-                                                        to_change_auto_update = Some((i, 2));
-                                                    }
-                                                    if ui.selectable_label(entry.auto_update_days == 3, "3 days").clicked() {
-                                                        to_change_auto_update = Some((i, 3));
-                                                    }
-                                                    if ui.selectable_label(entry.auto_update_days == 4, "4 days").clicked() {
-                                                        to_change_auto_update = Some((i, 4));
-                                                    }
-                                                    if ui.selectable_label(entry.auto_update_days == 5, "5 days").clicked() {
-                                                        to_change_auto_update = Some((i, 5));
-                                                    }
-                                                }).response.on_hover_text("Auto-update interval - automatically refresh playlist data");
-                                        }
-                                        
-                                        // Saved date
-                                        if entry.saved_at > 0 {
-                                            ui.label(egui::RichText::new(Self::format_datetime(entry.saved_at)).small().weak());
-                                        }
-                                        
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if ui.button("🗑").on_hover_text("Delete").clicked() {
-                                                to_delete = Some(i);
-                                            }
+                                            ui.label(name_text);
+                                            
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.button("🗑").on_hover_text("Delete").clicked() {
+                                                    to_delete = Some(i);
+                                                }
+                                                if ui.button("🔄").on_hover_text("Reload playlist data from server").clicked() {
+                                                    to_reload = Some(i);
+                                                }
+                                            });
                                         });
+                                        
+                                        // Line 2: Settings (only if enabled)
+                                        if entry.enabled {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(25.0); // Indent to align with name
+                                                
+                                                // Auto-login toggle for Xtream entries
+                                                if matches!(entry.entry_type, PlaylistType::Xtream { .. }) {
+                                                    let auto_text = if entry.auto_login { "⚡ Auto-login" } else { "○ Auto-login" };
+                                                    let hover = if entry.auto_login { "Auto-login ON - click to disable" } else { "Auto-login OFF - click to enable" };
+                                                    if ui.button(auto_text).on_hover_text(hover).clicked() {
+                                                        to_toggle_auto_login = Some(i);
+                                                    }
+                                                }
+                                                
+                                                // Auto-update dropdown
+                                                ui.label("Update:");
+                                                let update_text = match entry.auto_update_days {
+                                                    0 => "Off",
+                                                    1 => "1 day",
+                                                    2 => "2 days",
+                                                    3 => "3 days",
+                                                    4 => "4 days",
+                                                    5 => "5 days",
+                                                    _ => "?",
+                                                };
+                                                egui::ComboBox::from_id_salt(format!("auto_update_{}", i))
+                                                    .selected_text(update_text)
+                                                    .width(65.0)
+                                                    .show_ui(ui, |ui| {
+                                                        if ui.selectable_label(entry.auto_update_days == 0, "Off").clicked() {
+                                                            to_change_auto_update = Some((i, 0));
+                                                        }
+                                                        if ui.selectable_label(entry.auto_update_days == 1, "1 day").clicked() {
+                                                            to_change_auto_update = Some((i, 1));
+                                                        }
+                                                        if ui.selectable_label(entry.auto_update_days == 2, "2 days").clicked() {
+                                                            to_change_auto_update = Some((i, 2));
+                                                        }
+                                                        if ui.selectable_label(entry.auto_update_days == 3, "3 days").clicked() {
+                                                            to_change_auto_update = Some((i, 3));
+                                                        }
+                                                        if ui.selectable_label(entry.auto_update_days == 4, "4 days").clicked() {
+                                                            to_change_auto_update = Some((i, 4));
+                                                        }
+                                                        if ui.selectable_label(entry.auto_update_days == 5, "5 days").clicked() {
+                                                            to_change_auto_update = Some((i, 5));
+                                                        }
+                                                    }).response.on_hover_text("Auto-update interval - automatically refresh playlist data");
+                                                
+                                                // Saved date
+                                                if entry.saved_at > 0 {
+                                                    ui.label(egui::RichText::new(format!("Saved: {}", Self::format_datetime(entry.saved_at))).weak());
+                                                }
+                                            });
+                                        }
                                     });
                                     ui.separator();
                                 }
@@ -3645,6 +3641,44 @@ impl eframe::App for IPTVApp {
                         if let Some((url, name)) = to_load_m3u {
                             self.load_playlist_with_name(&url, &name);
                             self.show_playlist_manager = false;
+                        }
+                        
+                        // Handle manual reload for all playlist types
+                        if let Some(idx) = to_reload {
+                            let entry = &self.playlist_entries[idx];
+                            let name = entry.name.clone();
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            
+                            match &entry.entry_type {
+                                PlaylistType::M3U { url } => {
+                                    let url = url.clone();
+                                    let is_loaded = self.playlist_sources.iter().any(|(_, n)| n == &name);
+                                    if is_loaded {
+                                        self.log(&format!("[INFO] Manual reload triggered for '{}'", name));
+                                        self.playlist_entries[idx].last_updated = now;
+                                        save_playlist_entries(&self.playlist_entries);
+                                        self.reload_playlist(&url, &name);
+                                    } else {
+                                        // Not loaded - load it instead
+                                        self.load_playlist_with_name(&url, &name);
+                                    }
+                                }
+                                PlaylistType::Xtream { server, username, password } => {
+                                    // For Xtream, reload means re-login to refresh categories
+                                    self.server = server.clone();
+                                    self.username = username.clone();
+                                    self.password = password.clone();
+                                    self.log(&format!("[INFO] Manual reload triggered for '{}'", name));
+                                    self.playlist_entries[idx].last_updated = now;
+                                    save_playlist_entries(&self.playlist_entries);
+                                    self.current_playlist_idx = Some(idx);
+                                    self.login();
+                                    self.show_playlist_manager = false;
+                                }
+                            }
                         }
                         
                         if let Some(i) = to_delete {
