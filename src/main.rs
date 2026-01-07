@@ -468,11 +468,13 @@ struct IPTVApp {
     epg_last_ui_refresh: i64,
     epg_show_actual_time: bool, // false = offset mode (Now, +30m), true = actual time (8:00 PM)
     epg_load_on_startup: bool,
+    epg_panel_visible: bool, // Show/hide EPG panel in main window
     selected_epg_channel: Option<String>,
     // Auto-update throttling (check once per minute instead of every frame)
     last_auto_update_check: i64,
     // UI settings
     channel_name_width: f32,
+    list_layout: ListLayout,
 }
 
 impl Default for IPTVApp {
@@ -538,6 +540,7 @@ impl IPTVApp {
             };
         let epg_load_on_startup = config.epg_load_on_startup;
         let channel_name_width = config.channel_name_width;
+        let list_layout = config.list_layout;
         
         // Use per-playlist player settings if available
         let (external_player, buffer_seconds, connection_quality) = 
@@ -645,9 +648,11 @@ impl IPTVApp {
             epg_last_ui_refresh: 0,
             epg_show_actual_time: epg_show_actual_time,
             epg_load_on_startup: epg_load_on_startup,
+            epg_panel_visible: true, // Show EPG panel by default
             selected_epg_channel: None,
             last_auto_update_check: 0,
             channel_name_width,
+            list_layout,
         }
     }
     
@@ -746,6 +751,7 @@ impl IPTVApp {
         
         // Save UI settings
         self.config.channel_name_width = self.channel_name_width;
+        self.config.list_layout = self.list_layout;
         
         // Save favorites
         self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
@@ -2813,6 +2819,14 @@ impl eframe::App for IPTVApp {
                     self.show_epg_dialog = true;
                 }
                 
+                // Show/Hide EPG panel toggle (only if EPG data is loaded)
+                if self.epg_data.is_some() {
+                    let epg_toggle_text = if self.epg_panel_visible { "👁 Hide EPG" } else { "👁 Show EPG" };
+                    if ui.button(epg_toggle_text).on_hover_text("Toggle EPG panel visibility").clicked() {
+                        self.epg_panel_visible = !self.epg_panel_visible;
+                    }
+                }
+                
                 ui.separator();
                 
                 ui.checkbox(&mut self.dark_mode, "🌙 Dark");
@@ -3098,6 +3112,30 @@ impl eframe::App for IPTVApp {
                                             self.config.save();
                                         }
                                     });
+                                // Show layout dropdown when EPG panel is hidden
+                                let epg_panel_visible = self.epg_data.is_some() && self.epg_panel_visible;
+                                if !epg_panel_visible {
+                                    egui::ComboBox::from_id_salt("live_layout")
+                                        .selected_text(format!("{} {}", self.list_layout.icon(), self.list_layout.label()))
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_value(&mut self.list_layout, ListLayout::Single, "▤ 1 Column").changed() {
+                                                self.config.list_layout = self.list_layout;
+                                                self.config.save();
+                                            }
+                                            if ui.selectable_value(&mut self.list_layout, ListLayout::Double, "▥ 2 Columns").changed() {
+                                                self.config.list_layout = self.list_layout;
+                                                self.config.save();
+                                            }
+                                            if ui.selectable_value(&mut self.list_layout, ListLayout::Triple, "▦ 3 Columns").changed() {
+                                                self.config.list_layout = self.list_layout;
+                                                self.config.save();
+                                            }
+                                            if ui.selectable_value(&mut self.list_layout, ListLayout::Quad, "▩ 4 Columns").changed() {
+                                                self.config.list_layout = self.list_layout;
+                                                self.config.save();
+                                            }
+                                        });
+                                }
                                 ui.label(format!("({})", item_count));
                             }
                         }
@@ -3123,6 +3161,27 @@ impl eframe::App for IPTVApp {
                                         }
                                         if ui.selectable_value(&mut self.movie_sort_order, SortOrder::NameDesc, "↓ Name Z-A").changed() {
                                             self.config.movie_sort_order = self.movie_sort_order;
+                                            self.config.save();
+                                        }
+                                    });
+                                // Layout dropdown
+                                egui::ComboBox::from_id_salt("movie_layout")
+                                    .selected_text(format!("{} {}", self.list_layout.icon(), self.list_layout.label()))
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Single, "▤ Single").changed() {
+                                            self.config.list_layout = self.list_layout;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Double, "▥ 2 Columns").changed() {
+                                            self.config.list_layout = self.list_layout;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Triple, "▦ 3 Columns").changed() {
+                                            self.config.list_layout = self.list_layout;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Quad, "▩ 4 Columns").changed() {
+                                            self.config.list_layout = self.list_layout;
                                             self.config.save();
                                         }
                                     });
@@ -3155,6 +3214,27 @@ impl eframe::App for IPTVApp {
                                             self.config.save();
                                         }
                                     });
+                                // Layout dropdown
+                                egui::ComboBox::from_id_salt("series_layout")
+                                    .selected_text(format!("{} {}", self.list_layout.icon(), self.list_layout.label()))
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Single, "▤ Single").changed() {
+                                            self.config.list_layout = self.list_layout;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Double, "▥ 2 Columns").changed() {
+                                            self.config.list_layout = self.list_layout;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Triple, "▦ 3 Columns").changed() {
+                                            self.config.list_layout = self.list_layout;
+                                            self.config.save();
+                                        }
+                                        if ui.selectable_value(&mut self.list_layout, ListLayout::Quad, "▩ 4 Columns").changed() {
+                                            self.config.list_layout = self.list_layout;
+                                            self.config.save();
+                                        }
+                                    });
                                 ui.label(format!("({})", item_count));
                             }
                         }
@@ -3166,7 +3246,7 @@ impl eframe::App for IPTVApp {
 
             // Content area - split into channels (left) and EPG grid (right)
             let has_epg = self.epg_data.is_some();
-            let show_epg_panel = has_epg && 
+            let show_epg_panel = has_epg && self.epg_panel_visible &&
                 (self.current_tab == Tab::Live || 
                  self.current_tab == Tab::Favorites || 
                  self.current_tab == Tab::Recent);
@@ -4018,71 +4098,166 @@ impl IPTVApp {
                 SortOrder::Default => {} // Keep server order
             }
             
+            // Filter by search
+            let filtered: Vec<_> = channels.iter()
+                .filter(|c| {
+                    let display_name = Self::sanitize_text(&c.name);
+                    search.is_empty() || display_name.to_lowercase().contains(&search)
+                })
+                .collect();
+            
             let playlist_sources = &self.playlist_sources;
             let mut toggle_fav: Option<FavoriteItem> = None;
             let mut to_play: Option<Channel> = None;
             
-            for (idx, channel) in channels.iter().enumerate() {
-                // Show separator header for playlist sources (only in playlist mode)
-                if self.playlist_mode && !playlist_sources.is_empty() {
-                    for (start_idx, source_name) in playlist_sources {
-                        if *start_idx == idx {
-                            ui.add_space(8.0);
-                            ui.separator();
+            // Determine layout - don't use grid when EPG panel is shown (takes space)
+            let has_epg = self.epg_data.is_some();
+            let is_live = stream_type == "live";
+            let epg_panel_shown = has_epg && self.epg_panel_visible && is_live; // EPG shown for live in this tab
+            
+            // Calculate columns based on available width
+            let available_width = ui.available_width();
+            let min_item_width = 200.0; // Minimum width per item
+            let max_columns_for_width = (available_width / min_item_width).floor() as usize;
+            
+            let requested_columns = if epg_panel_shown {
+                1 // Always single column when EPG panel is visible
+            } else {
+                match self.list_layout {
+                    ListLayout::Single => 1,
+                    ListLayout::Double => 2,
+                    ListLayout::Triple => 3,
+                    ListLayout::Quad => 4,
+                }
+            };
+            
+            // Use the minimum of requested and what fits
+            let num_columns = requested_columns.min(max_columns_for_width).max(1);
+            let item_width = (available_width / num_columns as f32) - 8.0; // Account for spacing
+            
+            let text_size = 14.0;
+            let star_size = 18.0;
+            
+            // For playlist mode with separators, use single column
+            let use_grid = num_columns > 1 && !self.playlist_mode;
+            
+            if use_grid {
+                // Multi-column grid layout with calculated width
+                egui::Grid::new("channels_grid")
+                    .num_columns(num_columns)
+                    .spacing([4.0, 2.0])
+                    .min_col_width(item_width)
+                    .max_col_width(item_width)
+                    .show(ui, |ui| {
+                        for (i, channel) in filtered.iter().enumerate() {
+                            let is_fav = self.is_favorite(&channel.url);
+                            
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("📺 {}", source_name))
-                                    .strong()
-                                    .size(14.0)
-                                    .color(egui::Color32::from_rgb(100, 149, 237)));
+                                let fav_text = if is_fav { 
+                                    egui::RichText::new("★").size(star_size).color(egui::Color32::GOLD)
+                                } else { 
+                                    egui::RichText::new("☆").size(star_size).color(egui::Color32::GRAY)
+                                };
+                                if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                                    toggle_fav = Some(FavoriteItem {
+                                        name: channel.name.clone(),
+                                        url: channel.url.clone(),
+                                        stream_type: stream_type.to_string(),
+                                        stream_id: channel.stream_id,
+                                        series_id: None,
+                                        category_name: category_name.clone(),
+                                        container_extension: channel.container_extension.clone(),
+                                        season_num: None,
+                                        episode_num: None,
+                                        series_name: None,
+                                        playlist_source: channel.playlist_source.clone(),
+                                    });
+                                }
+                                
+                                if ui.button("▶").clicked() {
+                                    to_play = Some((*channel).clone());
+                                }
+                                
+                                // Name as button for grid - truncate to fit column width
+                                let display_name = Self::sanitize_text(&channel.name);
+                                let name_width = item_width - 70.0; // Account for star and play buttons
+                                let truncated = Self::truncate_to_width(&display_name, name_width);
+                                let response = ui.button(egui::RichText::new(&truncated).size(text_size).strong());
+                                if truncated != display_name {
+                                    response.clone().on_hover_text(&display_name);
+                                }
+                                if response.clicked() {
+                                    to_play = Some((*channel).clone());
+                                }
                             });
-                            ui.separator();
-                            ui.add_space(4.0);
+                            
+                            if (i + 1) % num_columns == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+            } else {
+                // Single column layout (or playlist mode)
+                for (idx, channel) in channels.iter().enumerate() {
+                    // Show separator header for playlist sources (only in playlist mode)
+                    if self.playlist_mode && !playlist_sources.is_empty() {
+                        for (start_idx, source_name) in playlist_sources {
+                            if *start_idx == idx {
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("📺 {}", source_name))
+                                        .strong()
+                                        .size(14.0)
+                                        .color(egui::Color32::from_rgb(100, 149, 237)));
+                                });
+                                ui.separator();
+                                ui.add_space(4.0);
+                            }
                         }
                     }
+                    
+                    let display_name = Self::sanitize_text(&channel.name);
+                    if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
+                        continue;
+                    }
+                    
+                    let is_fav = self.is_favorite(&channel.url);
+                    
+                    ui.horizontal(|ui| {
+                        let fav_text = if is_fav { 
+                            egui::RichText::new("★").size(star_size).color(egui::Color32::GOLD)
+                        } else { 
+                            egui::RichText::new("☆").size(star_size).color(egui::Color32::GRAY)
+                        };
+                        if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                            toggle_fav = Some(FavoriteItem {
+                                name: channel.name.clone(),
+                                url: channel.url.clone(),
+                                stream_type: stream_type.to_string(),
+                                stream_id: channel.stream_id,
+                                series_id: None,
+                                category_name: category_name.clone(),
+                                container_extension: channel.container_extension.clone(),
+                                season_num: None,
+                                episode_num: None,
+                                series_name: None,
+                                playlist_source: channel.playlist_source.clone(),
+                            });
+                        }
+                        
+                        if ui.button("▶").clicked() {
+                            to_play = Some(channel.clone());
+                        }
+                        
+                        self.show_channel_name(ui, &channel.name, name_width, true);
+                        
+                        // Show EPG info if available (only for live streams)
+                        if stream_type == "live" {
+                            self.show_epg_inline(ui, &channel.name, channel.epg_channel_id.as_deref());
+                        }
+                    });
                 }
-                
-                let display_name = Self::sanitize_text(&channel.name);
-                if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
-                    continue;
-                }
-                
-                let is_fav = self.is_favorite(&channel.url);
-                
-                ui.horizontal(|ui| {
-                    // Favorite checkbox - use colored text for better visibility
-                    let fav_text = if is_fav { 
-                        egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)
-                    } else { 
-                        egui::RichText::new("☆").size(18.0).color(egui::Color32::GRAY)
-                    };
-                    if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
-                        toggle_fav = Some(FavoriteItem {
-                            name: channel.name.clone(),
-                            url: channel.url.clone(),
-                            stream_type: stream_type.to_string(),
-                            stream_id: channel.stream_id,
-                            series_id: None,
-                            category_name: category_name.clone(),
-                            container_extension: channel.container_extension.clone(),
-                            season_num: None,
-                            episode_num: None,
-                            series_name: None,
-                            playlist_source: channel.playlist_source.clone(),
-                        });
-                    }
-                    
-                    if ui.button("▶").clicked() {
-                        to_play = Some(channel.clone());
-                    }
-                    
-                    // Fixed-width channel name with truncation
-                    self.show_channel_name(ui, &channel.name, name_width, true);
-                    
-                    // Show EPG info if available (only for live streams)
-                    if stream_type == "live" {
-                        self.show_epg_inline(ui, &channel.name, channel.epg_channel_id.as_deref());
-                    }
-                });
             }
             
             if let Some(channel) = to_play {
@@ -4116,15 +4291,64 @@ impl IPTVApp {
             SortOrder::Default => {} // Keep server order
         }
         
-        for cat in &sorted_categories {
-            let display_name = Self::sanitize_text(&cat.category_name);
-            if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
-                continue;
+        // Filter categories by search
+        let filtered: Vec<_> = sorted_categories.iter()
+            .filter(|cat| {
+                let display_name = Self::sanitize_text(&cat.category_name);
+                search.is_empty() || display_name.to_lowercase().contains(&search)
+            })
+            .collect();
+        
+        // Render based on layout - but force single column for live when EPG panel is visible
+        let has_epg = self.epg_data.is_some();
+        let is_live = stream_type == "live";
+        let epg_panel_shown = has_epg && self.epg_panel_visible && is_live;
+        
+        // Calculate columns based on available width
+        let available_width = ui.available_width();
+        let min_item_width = 180.0; // Minimum width per category button
+        let max_columns_for_width = (available_width / min_item_width).floor() as usize;
+        
+        let requested_columns = if epg_panel_shown {
+            1 // Always single column when EPG panel is visible
+        } else {
+            match self.list_layout {
+                ListLayout::Single => 1,
+                ListLayout::Double => 2,
+                ListLayout::Triple => 3,
+                ListLayout::Quad => 4,
             }
-            
-            if ui.button(&display_name).clicked() {
-                clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
+        };
+        
+        let num_columns = requested_columns.min(max_columns_for_width).max(1);
+        
+        if num_columns == 1 {
+            // Single column
+            for cat in &filtered {
+                let display_name = Self::sanitize_text(&cat.category_name);
+                if ui.button(&display_name).clicked() {
+                    clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
+                }
             }
+        } else {
+            // Multi-column grid
+            let item_width = (available_width / num_columns as f32) - 12.0;
+            egui::Grid::new("category_grid")
+                .num_columns(num_columns)
+                .spacing([8.0, 4.0])
+                .min_col_width(item_width)
+                .max_col_width(item_width)
+                .show(ui, |ui| {
+                    for (i, cat) in filtered.iter().enumerate() {
+                        let display_name = Self::sanitize_text(&cat.category_name);
+                        if ui.button(&display_name).clicked() {
+                            clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
+                        }
+                        if (i + 1) % num_columns == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
         }
         
         if let Some((cat_id, cat_name)) = clicked_category {
@@ -4204,46 +4428,119 @@ impl IPTVApp {
                 SortOrder::Default => {} // Keep server order
             }
             
+            // Filter by search
+            let filtered: Vec<_> = series_list.iter()
+                .filter(|s| {
+                    let display_name = Self::sanitize_text(&s.name);
+                    search.is_empty() || display_name.to_lowercase().contains(&search)
+                })
+                .collect();
+            
             let mut clicked_series: Option<i64> = None;
             let mut toggle_fav: Option<FavoriteItem> = None;
             
-            for series in &series_list {
-                let display_name = Self::sanitize_text(&series.name);
-                if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
-                    continue;
-                }
-                
-                // Create a unique URL for series favorite (using series_id)
-                let series_url = format!("series://{}", series.series_id);
-                let is_fav = self.is_favorite(&series_url);
-                
-                ui.horizontal(|ui| {
-                    // Favorite star
-                    let fav_text = if is_fav { 
-                        egui::RichText::new("★").size(18.0).color(egui::Color32::GOLD)
-                    } else { 
-                        egui::RichText::new("☆").size(18.0).color(egui::Color32::GRAY)
-                    };
-                    if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
-                        toggle_fav = Some(FavoriteItem {
-                            name: series.name.clone(),
-                            url: series_url,
-                            stream_type: "series".to_string(),
-                            stream_id: None,
-                            series_id: Some(series.series_id),
-                            category_name: category_name.clone(),
-                            container_extension: None,
-                            season_num: None,
-                            episode_num: None,
-                            series_name: None,
-                            playlist_source: None,
-                        });
-                    }
+            // Calculate columns based on available width
+            let available_width = ui.available_width();
+            let min_item_width = 200.0;
+            let max_columns_for_width = (available_width / min_item_width).floor() as usize;
+            
+            let requested_columns = match self.list_layout {
+                ListLayout::Single => 1,
+                ListLayout::Double => 2,
+                ListLayout::Triple => 3,
+                ListLayout::Quad => 4,
+            };
+            let num_columns = requested_columns.min(max_columns_for_width).max(1);
+            let item_width = (available_width / num_columns as f32) - 8.0;
+            
+            let text_size = 14.0;
+            let star_size = 18.0;
+            
+            if num_columns > 1 {
+                // Multi-column grid layout
+                egui::Grid::new("series_list_grid")
+                    .num_columns(num_columns)
+                    .spacing([4.0, 2.0])
+                    .min_col_width(item_width)
+                    .max_col_width(item_width)
+                    .show(ui, |ui| {
+                        for (i, series) in filtered.iter().enumerate() {
+                            let series_url = format!("series://{}", series.series_id);
+                            let is_fav = self.is_favorite(&series_url);
+                            
+                            ui.horizontal(|ui| {
+                                let fav_text = if is_fav { 
+                                    egui::RichText::new("★").size(star_size).color(egui::Color32::GOLD)
+                                } else { 
+                                    egui::RichText::new("☆").size(star_size).color(egui::Color32::GRAY)
+                                };
+                                if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                                    toggle_fav = Some(FavoriteItem {
+                                        name: series.name.clone(),
+                                        url: series_url,
+                                        stream_type: "series".to_string(),
+                                        stream_id: None,
+                                        series_id: Some(series.series_id),
+                                        category_name: category_name.clone(),
+                                        container_extension: None,
+                                        season_num: None,
+                                        episode_num: None,
+                                        series_name: None,
+                                        playlist_source: None,
+                                    });
+                                }
+                                
+                                let display_name = Self::sanitize_text(&series.name);
+                                let name_width = item_width - 40.0;
+                                let truncated = Self::truncate_to_width(&display_name, name_width);
+                                let response = ui.button(egui::RichText::new(&truncated).size(text_size));
+                                if truncated != display_name {
+                                    response.clone().on_hover_text(&display_name);
+                                }
+                                if response.clicked() {
+                                    clicked_series = Some(series.series_id);
+                                }
+                            });
+                            
+                            if (i + 1) % num_columns == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+            } else {
+                // Single column layout
+                for series in &filtered {
+                    let display_name = Self::sanitize_text(&series.name);
+                    let series_url = format!("series://{}", series.series_id);
+                    let is_fav = self.is_favorite(&series_url);
                     
-                    if ui.button(&display_name).clicked() {
-                        clicked_series = Some(series.series_id);
-                    }
-                });
+                    ui.horizontal(|ui| {
+                        let fav_text = if is_fav { 
+                            egui::RichText::new("★").size(star_size).color(egui::Color32::GOLD)
+                        } else { 
+                            egui::RichText::new("☆").size(star_size).color(egui::Color32::GRAY)
+                        };
+                        if ui.button(fav_text).on_hover_text(if is_fav { "Remove from favorites" } else { "Add to favorites" }).clicked() {
+                            toggle_fav = Some(FavoriteItem {
+                                name: series.name.clone(),
+                                url: series_url,
+                                stream_type: "series".to_string(),
+                                stream_id: None,
+                                series_id: Some(series.series_id),
+                                category_name: category_name.clone(),
+                                container_extension: None,
+                                season_num: None,
+                                episode_num: None,
+                                series_name: None,
+                                playlist_source: None,
+                            });
+                        }
+                        
+                        if ui.button(&display_name).clicked() {
+                            clicked_series = Some(series.series_id);
+                        }
+                    });
+                }
             }
             
             if let Some(fav) = toggle_fav {
@@ -4272,15 +4569,54 @@ impl IPTVApp {
             SortOrder::Default => {} // Keep server order
         }
         
-        for cat in &sorted_categories {
-            let display_name = Self::sanitize_text(&cat.category_name);
-            if !search.is_empty() && !display_name.to_lowercase().contains(&search) {
-                continue;
+        // Filter categories by search
+        let filtered: Vec<_> = sorted_categories.iter()
+            .filter(|cat| {
+                let display_name = Self::sanitize_text(&cat.category_name);
+                search.is_empty() || display_name.to_lowercase().contains(&search)
+            })
+            .collect();
+        
+        // Calculate columns based on available width
+        let available_width = ui.available_width();
+        let min_item_width = 180.0;
+        let max_columns_for_width = (available_width / min_item_width).floor() as usize;
+        
+        let requested_columns = match self.list_layout {
+            ListLayout::Single => 1,
+            ListLayout::Double => 2,
+            ListLayout::Triple => 3,
+            ListLayout::Quad => 4,
+        };
+        let num_columns = requested_columns.min(max_columns_for_width).max(1);
+        
+        if num_columns == 1 {
+            // Single column
+            for cat in &filtered {
+                let display_name = Self::sanitize_text(&cat.category_name);
+                if ui.button(&display_name).clicked() {
+                    clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
+                }
             }
-            
-            if ui.button(&display_name).clicked() {
-                clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
-            }
+        } else {
+            // Multi-column grid
+            let item_width = (available_width / num_columns as f32) - 12.0;
+            egui::Grid::new("series_category_grid")
+                .num_columns(num_columns)
+                .spacing([8.0, 4.0])
+                .min_col_width(item_width)
+                .max_col_width(item_width)
+                .show(ui, |ui| {
+                    for (i, cat) in filtered.iter().enumerate() {
+                        let display_name = Self::sanitize_text(&cat.category_name);
+                        if ui.button(&display_name).clicked() {
+                            clicked_category = Some((cat.category_id.clone(), cat.category_name.clone()));
+                        }
+                        if (i + 1) % num_columns == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
         }
         
         if let Some((cat_id, cat_name)) = clicked_category {

@@ -28,6 +28,36 @@ impl ConnectionQuality {
     }
 }
 
+/// Layout for content lists (Movies, Series)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum ListLayout {
+    #[default]
+    Single,     // One column
+    Double,     // Two columns
+    Triple,     // Three columns
+    Quad,       // Four columns
+}
+
+impl ListLayout {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ListLayout::Single => "1 Column",
+            ListLayout::Double => "2 Columns",
+            ListLayout::Triple => "3 Columns",
+            ListLayout::Quad => "4 Columns",
+        }
+    }
+    
+    pub fn icon(&self) -> &'static str {
+        match self {
+            ListLayout::Single => "▤",
+            ListLayout::Double => "▥",
+            ListLayout::Triple => "▦",
+            ListLayout::Quad => "▩",
+        }
+    }
+}
+
 /// Sort order for content lists
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum SortOrder {
@@ -126,6 +156,8 @@ pub struct AppConfig {
     // UI settings
     #[serde(default = "default_channel_name_width")]
     pub channel_name_width: f32,
+    #[serde(default)]
+    pub list_layout: ListLayout,
 }
 
 fn default_buffer() -> u32 { 5 }
@@ -165,6 +197,7 @@ impl Default for AppConfig {
             movie_sort_order: SortOrder::Default,
             series_sort_order: SortOrder::Default,
             channel_name_width: 200.0,
+            list_layout: ListLayout::Single,
         }
     }
 }
