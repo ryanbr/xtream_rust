@@ -1490,10 +1490,46 @@ impl IPTVApp {
         let epg_id: Option<String> = epg_channel_id
             .map(|id| id.to_string())
             .or_else(|| {
+                // Clean up channel name for matching (remove common prefixes like "US:", "UK:", etc.)
+                let clean_name = channel_name
+                    .split(':')
+                    .last()
+                    .unwrap_or(channel_name)
+                    .trim()
+                    .to_lowercase();
+                
+                // Skip very short names that could cause false matches
+                if clean_name.len() < 4 {
+                    return None;
+                }
+                
                 epg.channels.iter()
                     .find(|(_, ch)| {
-                        contains_ignore_case(&ch.name, channel_name) ||
-                        contains_ignore_case(channel_name, &ch.name)
+                        let clean_epg = ch.name
+                            .split(':')
+                            .last()
+                            .unwrap_or(&ch.name)
+                            .trim()
+                            .to_lowercase();
+                        
+                        // Require exact match or very close match (one contains the other fully)
+                        // But the shorter string must be at least 80% of the longer one's length
+                        if clean_name == clean_epg {
+                            return true;
+                        }
+                        
+                        let (shorter, longer) = if clean_name.len() < clean_epg.len() {
+                            (&clean_name, &clean_epg)
+                        } else {
+                            (&clean_epg, &clean_name)
+                        };
+                        
+                        // Only match if shorter is substantial part of longer (>80%)
+                        if shorter.len() * 100 / longer.len() >= 80 {
+                            longer.contains(shorter.as_str())
+                        } else {
+                            false
+                        }
                     })
                     .map(|(id, _)| id.clone())
             });
@@ -5344,13 +5380,47 @@ impl IPTVApp {
                                 .and_then(|c| c.epg_channel_id.clone())
                         })
                         .or_else(|| {
-                            // Search EPG data for matching channel name (case-insensitive)
+                            // Search EPG data for matching channel name (strict matching)
                             if let Some(ref epg) = self.epg_data {
+                                // Clean up channel name for matching
+                                let clean_name = channel_name
+                                    .split(':')
+                                    .last()
+                                    .unwrap_or(channel_name)
+                                    .trim()
+                                    .to_lowercase();
+                                
+                                // Skip very short names
+                                if clean_name.len() < 4 {
+                                    return None;
+                                }
+                                
                                 epg.channels.iter()
                                     .find(|(_id, ch)| {
-                                        // Use case-insensitive contains without allocation
-                                        contains_ignore_case(&ch.name, channel_name) ||
-                                        contains_ignore_case(channel_name, &ch.name)
+                                        let clean_epg = ch.name
+                                            .split(':')
+                                            .last()
+                                            .unwrap_or(&ch.name)
+                                            .trim()
+                                            .to_lowercase();
+                                        
+                                        // Exact match
+                                        if clean_name == clean_epg {
+                                            return true;
+                                        }
+                                        
+                                        // One contains the other, but must be substantial match (>80%)
+                                        let (shorter, longer) = if clean_name.len() < clean_epg.len() {
+                                            (&clean_name, &clean_epg)
+                                        } else {
+                                            (&clean_epg, &clean_name)
+                                        };
+                                        
+                                        if shorter.len() * 100 / longer.len() >= 80 {
+                                            longer.contains(shorter.as_str())
+                                        } else {
+                                            false
+                                        }
                                     })
                                     .map(|(id, _)| id.clone())
                             } else {
