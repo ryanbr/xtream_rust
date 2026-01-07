@@ -471,6 +471,8 @@ struct IPTVApp {
     selected_epg_channel: Option<String>,
     // Auto-update throttling (check once per minute instead of every frame)
     last_auto_update_check: i64,
+    // UI settings
+    channel_name_width: f32,
 }
 
 impl Default for IPTVApp {
@@ -535,6 +537,7 @@ impl IPTVApp {
                 (config.epg_url.clone(), config.epg_auto_update_index, config.epg_time_offset, config.epg_show_actual_time)
             };
         let epg_load_on_startup = config.epg_load_on_startup;
+        let channel_name_width = config.channel_name_width;
         
         // Use per-playlist player settings if available
         let (external_player, buffer_seconds, connection_quality) = 
@@ -644,6 +647,7 @@ impl IPTVApp {
             epg_load_on_startup: epg_load_on_startup,
             selected_epg_channel: None,
             last_auto_update_check: 0,
+            channel_name_width,
         }
     }
     
@@ -739,6 +743,9 @@ impl IPTVApp {
         self.config.epg_time_offset = self.epg_time_offset;
         self.config.epg_show_actual_time = self.epg_show_actual_time;
         self.config.epg_load_on_startup = self.epg_load_on_startup;
+        
+        // Save UI settings
+        self.config.channel_name_width = self.channel_name_width;
         
         // Save favorites
         self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
@@ -944,6 +951,32 @@ impl IPTVApp {
             .split_whitespace()
             .collect::<Vec<&str>>()
             .join(" ") // Collapse multiple spaces
+    }
+    
+    /// Truncate text to fit within a pixel width (approximately 7 pixels per character)
+    fn truncate_to_width(text: &str, width: f32) -> String {
+        let max_chars = ((width / 7.0) as usize).max(5);
+        if text.chars().count() <= max_chars {
+            text.to_string()
+        } else {
+            let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+            format!("{}…", truncated)
+        }
+    }
+    
+    /// Display a fixed-width channel name with truncation and hover tooltip
+    fn show_channel_name(&self, ui: &mut egui::Ui, name: &str, width: f32, strong: bool) {
+        let display_name = Self::sanitize_text(name);
+        let truncated_name = Self::truncate_to_width(&display_name, width);
+        let label = if strong {
+            egui::Label::new(egui::RichText::new(&truncated_name).strong()).sense(egui::Sense::hover())
+        } else {
+            egui::Label::new(&truncated_name).sense(egui::Sense::hover())
+        };
+        let name_response = ui.add_sized([width, 18.0], label);
+        if truncated_name != display_name {
+            name_response.on_hover_text(&display_name);
+        }
     }
 
     fn get_effective_buffer(&self) -> u32 {
@@ -3964,6 +3997,8 @@ impl IPTVApp {
                 String::new()
             };
             
+            let name_width = self.channel_name_width;
+            
             // Clone and sort channels
             let mut channels: Vec<_> = self.current_channels.clone();
             
@@ -4040,7 +4075,8 @@ impl IPTVApp {
                         to_play = Some(channel.clone());
                     }
                     
-                    ui.label(egui::RichText::new(&display_name).strong());
+                    // Fixed-width channel name with truncation
+                    self.show_channel_name(ui, &channel.name, name_width, true);
                     
                     // Show EPG info if available (only for live streams)
                     if stream_type == "live" {
@@ -4410,6 +4446,8 @@ impl IPTVApp {
             return;
         }
         
+        let name_width = self.channel_name_width;
+        
         // Clone favorites to avoid borrow issues
         let live_favs: Vec<_> = self.favorites.iter()
             .filter(|f| f.stream_type == "live")
@@ -4449,7 +4487,7 @@ impl IPTVApp {
                             if ui.button("▶").clicked() {
                                 to_play = Some(fav.clone());
                             }
-                            ui.label(Self::sanitize_text(&fav.name));
+                            self.show_channel_name(ui, &fav.name, name_width, false);
                             self.show_epg_inline(ui, &fav.name, None);
                             if let Some(ref src) = fav.playlist_source {
                                 ui.label(egui::RichText::new(format!("[{}]", src)).small().color(egui::Color32::from_rgb(100, 149, 237)));
@@ -4473,7 +4511,7 @@ impl IPTVApp {
                             if ui.button("▶").clicked() {
                                 to_play = Some(fav.clone());
                             }
-                            ui.label(Self::sanitize_text(&fav.name));
+                            self.show_channel_name(ui, &fav.name, name_width, false);
                             if let Some(ref src) = fav.playlist_source {
                                 ui.label(egui::RichText::new(format!("[{}]", src)).small().color(egui::Color32::from_rgb(100, 149, 237)));
                             } else {
@@ -4613,6 +4651,8 @@ impl IPTVApp {
             return;
         }
         
+        let name_width = self.channel_name_width;
+        
         // Clone to avoid borrow issues
         let recent: Vec<_> = self.recent_watched.iter().cloned().collect();
         let mut to_play: Option<FavoriteItem> = None;
@@ -4633,7 +4673,7 @@ impl IPTVApp {
                 } else {
                     if ui.button(egui::RichText::new("☆").size(16.0).color(egui::Color32::GRAY))
                         .on_hover_text("Add to favorites")
-                        .clicked() 
+                        .clicked()
                     {
                         to_toggle_fav = Some(item.clone());
                     }
@@ -4652,7 +4692,8 @@ impl IPTVApp {
                 };
                 ui.label(type_icon);
                 
-                ui.label(Self::sanitize_text(&item.name));
+                // Fixed-width name with truncation
+                self.show_channel_name(ui, &item.name, name_width, false);
                 
                 // Show EPG info (will only display if EPG match found)
                 self.show_epg_inline(ui, &item.name, None);
@@ -4802,7 +4843,7 @@ impl IPTVApp {
         let adjusted_now = self.get_adjusted_now();
         
         // Fixed layout for scrollable grid
-        let channel_col_width = 137.0;  // Channel column width
+        let channel_col_width = self.channel_name_width;
         let prog_col_width = 130.0;
         let num_progs = 7; // Show 7 programs (current + 6 upcoming), user scrolls to see more
         
@@ -4852,7 +4893,47 @@ impl IPTVApp {
         
         // Fixed time header row (outside scroll area)
         ui.horizontal(|ui| {
-            ui.add_sized([channel_col_width, 20.0], egui::Label::new("")); // Channel column spacer
+            // Channel column header - show "Channel" label
+            ui.add_sized([channel_col_width - 5.0, 20.0], egui::Label::new(egui::RichText::new("Channel").strong()));
+            
+            // Draw resize handle (vertical bar at the right edge of channel column)
+            let resize_rect = egui::Rect::from_min_size(
+                egui::pos2(ui.min_rect().left() + channel_col_width - 4.0, ui.min_rect().top()),
+                egui::vec2(8.0, 20.0)
+            );
+            let resize_response = ui.interact(resize_rect, ui.id().with("epg_resize"), egui::Sense::drag());
+            
+            // Change cursor on hover
+            if resize_response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            
+            // Handle drag
+            if resize_response.dragged() {
+                let delta = resize_response.drag_delta().x;
+                self.channel_name_width = (self.channel_name_width + delta).clamp(80.0, 300.0);
+            }
+            
+            // Save on drag release
+            if resize_response.drag_stopped() {
+                self.config.channel_name_width = self.channel_name_width;
+                self.config.save();
+            }
+            
+            // Draw the resize handle visual (subtle vertical line)
+            let painter = ui.painter();
+            let handle_color = if resize_response.hovered() || resize_response.dragged() {
+                egui::Color32::from_rgb(100, 149, 237) // Highlight when active
+            } else {
+                egui::Color32::from_gray(80)
+            };
+            painter.vline(
+                resize_rect.center().x,
+                resize_rect.y_range(),
+                egui::Stroke::new(2.0, handle_color)
+            );
+            
+            // Time labels
             for label in &time_labels {
                 ui.add_sized([prog_col_width, 20.0], egui::Label::new(egui::RichText::new(label).strong()));
             }
@@ -4892,14 +4973,19 @@ impl IPTVApp {
                     let is_selected = self.selected_epg_channel.as_ref() == Some(channel_name);
                     
                     ui.horizontal(|ui| {
-                        // Channel name (clickable) - fixed width
+                        // Channel name (clickable) - use truncate_to_width for dynamic sizing
                         let name_text = Self::sanitize_text(channel_name);
-                        let short_name: String = name_text.chars().take(14).collect();
+                        let short_name = Self::truncate_to_width(&name_text, channel_col_width - 10.0);
                         
                         let response = ui.add_sized([channel_col_width - 5.0, 20.0], 
                             egui::Button::new(egui::RichText::new(&short_name).strong())
                                 .selected(is_selected)
                         );
+                        
+                        // Show full name on hover if truncated
+                        if short_name != name_text {
+                            response.clone().on_hover_text(&name_text);
+                        }
                         
                         if response.clicked() {
                             self.selected_epg_channel = Some(channel_name.clone());

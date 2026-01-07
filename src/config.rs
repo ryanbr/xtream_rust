@@ -123,11 +123,15 @@ pub struct AppConfig {
     pub movie_sort_order: SortOrder,
     #[serde(default)]
     pub series_sort_order: SortOrder,
+    // UI settings
+    #[serde(default = "default_channel_name_width")]
+    pub channel_name_width: f32,
 }
 
 fn default_buffer() -> u32 { 5 }
 fn default_font_size() -> u32 { 12 }
 fn default_true() -> bool { true }
+fn default_channel_name_width() -> f32 { 200.0 }
 fn default_epg_auto_update() -> u8 { 3 } // 1 Day
 
 impl Default for AppConfig {
@@ -160,6 +164,7 @@ impl Default for AppConfig {
             live_sort_order: SortOrder::Default,
             movie_sort_order: SortOrder::Default,
             series_sort_order: SortOrder::Default,
+            channel_name_width: 200.0,
         }
     }
 }
