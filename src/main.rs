@@ -1489,13 +1489,20 @@ impl IPTVApp {
             }
         }).unwrap_or_default();
         
-        // Determine stream type
+        // Determine stream type based on URL pattern and channel properties
         let stream_type = if channel.series_id.is_some() {
             "series"
+        } else if channel.url.contains("/live/") {
+            "live"
+        } else if channel.url.contains("/movie/") {
+            "movie"
         } else if self.current_tab == Tab::Live {
             "live"
-        } else {
+        } else if self.current_tab == Tab::Movies {
             "movie"
+        } else {
+            // Default to live for ambiguous cases (M3U playlists, etc.)
+            "live"
         };
         
         // Don't reorder if playing from Recent tab
