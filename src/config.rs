@@ -58,6 +58,36 @@ impl ListLayout {
     }
 }
 
+/// Font size options
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum FontSize {
+    #[default]
+    Default,    // 13px
+    Medium,     // 15px
+    Large,      // 16px
+    XLarge,     // 18px
+}
+
+impl FontSize {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FontSize::Default => "Default",
+            FontSize::Medium => "Medium",
+            FontSize::Large => "Large",
+            FontSize::XLarge => "X-Large",
+        }
+    }
+    
+    pub fn size(&self) -> f32 {
+        match self {
+            FontSize::Default => 13.0,
+            FontSize::Medium => 15.0,
+            FontSize::Large => 16.0,
+            FontSize::XLarge => 18.0,
+        }
+    }
+}
+
 /// Sort order for content lists
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum SortOrder {
@@ -158,6 +188,8 @@ pub struct AppConfig {
     pub channel_name_width: f32,
     #[serde(default)]
     pub list_layout: ListLayout,
+    #[serde(default)]
+    pub font_size_setting: FontSize,
 }
 
 fn default_buffer() -> u32 { 5 }
@@ -198,6 +230,7 @@ impl Default for AppConfig {
             series_sort_order: SortOrder::Default,
             channel_name_width: 200.0,
             list_layout: ListLayout::Single,
+            font_size_setting: FontSize::Default,
         }
     }
 }

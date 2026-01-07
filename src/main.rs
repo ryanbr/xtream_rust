@@ -475,6 +475,7 @@ struct IPTVApp {
     // UI settings
     channel_name_width: f32,
     list_layout: ListLayout,
+    font_size_setting: FontSize,
 }
 
 impl Default for IPTVApp {
@@ -541,6 +542,7 @@ impl IPTVApp {
         let epg_load_on_startup = config.epg_load_on_startup;
         let channel_name_width = config.channel_name_width;
         let list_layout = config.list_layout;
+        let font_size_setting = config.font_size_setting;
         
         // Use per-playlist player settings if available
         let (external_player, buffer_seconds, connection_quality) = 
@@ -653,6 +655,7 @@ impl IPTVApp {
             last_auto_update_check: 0,
             channel_name_width,
             list_layout,
+            font_size_setting,
         }
     }
     
@@ -752,6 +755,7 @@ impl IPTVApp {
         // Save UI settings
         self.config.channel_name_width = self.channel_name_width;
         self.config.list_layout = self.list_layout;
+        self.config.font_size_setting = self.font_size_setting;
         
         // Save favorites
         self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
@@ -2764,6 +2768,23 @@ impl eframe::App for IPTVApp {
         } else {
             ctx.set_visuals(egui::Visuals::light());
         }
+        
+        // Apply font size
+        let font_size = self.font_size_setting.size();
+        let mut style = (*ctx.style()).clone();
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::new(font_size, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(font_size, egui::FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            egui::FontId::new(font_size - 2.0, egui::FontFamily::Proportional),
+        );
+        ctx.set_style(style);
 
         // Top panel - Controls
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -2829,7 +2850,6 @@ impl eframe::App for IPTVApp {
                 
                 ui.separator();
                 
-                ui.checkbox(&mut self.dark_mode, "🌙 Dark");
                 ui.checkbox(&mut self.single_window_mode, "Single Window")
                     .on_hover_text("Close previous player when opening new stream");
                 
@@ -2959,6 +2979,38 @@ impl eframe::App for IPTVApp {
                 
                 ui.checkbox(&mut self.hw_accel, "HW Acceleration")
                     .on_hover_text("GPU Decoding\n\nEnable GPU hardware acceleration for video decoding\nDisable if you experience playback issues");
+                
+                ui.separator();
+                
+                ui.checkbox(&mut self.dark_mode, "🌙 Dark");
+                
+                ui.separator();
+                
+                // Font size dropdown
+                ui.label("Font Size:");
+                egui::ComboBox::from_id_salt("font_size_selector")
+                    .selected_text(self.font_size_setting.label())
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_value(&mut self.font_size_setting, FontSize::Default, "Default (13px)").changed() {
+                            self.config.font_size_setting = self.font_size_setting;
+                            self.config.save();
+                        }
+                        ui.separator();
+                        if ui.selectable_value(&mut self.font_size_setting, FontSize::Medium, "Medium (15px)").changed() {
+                            self.config.font_size_setting = self.font_size_setting;
+                            self.config.save();
+                        }
+                        ui.separator();
+                        if ui.selectable_value(&mut self.font_size_setting, FontSize::Large, "Large (16px)").changed() {
+                            self.config.font_size_setting = self.font_size_setting;
+                            self.config.save();
+                        }
+                        ui.separator();
+                        if ui.selectable_value(&mut self.font_size_setting, FontSize::XLarge, "X-Large (18px)").changed() {
+                            self.config.font_size_setting = self.font_size_setting;
+                            self.config.save();
+                        }
+                    });
             });
             
             ui.add_space(5.0);
