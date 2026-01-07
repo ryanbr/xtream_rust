@@ -114,6 +114,8 @@ pub struct AppConfig {
     pub epg_time_offset: f32,
     #[serde(default)]
     pub epg_show_actual_time: bool,
+    #[serde(default = "default_true")]
+    pub epg_load_on_startup: bool,
     // Sort settings
     #[serde(default)]
     pub live_sort_order: SortOrder,
@@ -154,6 +156,7 @@ impl Default for AppConfig {
             epg_auto_update_index: 3, // 1 Day
             epg_time_offset: 0.0,
             epg_show_actual_time: false,
+            epg_load_on_startup: true,
             live_sort_order: SortOrder::Default,
             movie_sort_order: SortOrder::Default,
             series_sort_order: SortOrder::Default,

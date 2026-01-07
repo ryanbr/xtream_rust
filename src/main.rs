@@ -467,6 +467,7 @@ struct IPTVApp {
     epg_last_update: Option<i64>,
     epg_last_ui_refresh: i64,
     epg_show_actual_time: bool, // false = offset mode (Now, +30m), true = actual time (8:00 PM)
+    epg_load_on_startup: bool,
     selected_epg_channel: Option<String>,
     // Auto-update throttling (check once per minute instead of every frame)
     last_auto_update_check: i64,
@@ -533,6 +534,7 @@ impl IPTVApp {
             } else {
                 (config.epg_url.clone(), config.epg_auto_update_index, config.epg_time_offset, config.epg_show_actual_time)
             };
+        let epg_load_on_startup = config.epg_load_on_startup;
         
         // Use per-playlist player settings if available
         let (external_player, buffer_seconds, connection_quality) = 
@@ -639,6 +641,7 @@ impl IPTVApp {
             epg_last_update: None,
             epg_last_ui_refresh: 0,
             epg_show_actual_time: epg_show_actual_time,
+            epg_load_on_startup: epg_load_on_startup,
             selected_epg_channel: None,
             last_auto_update_check: 0,
         }
@@ -735,6 +738,7 @@ impl IPTVApp {
         self.config.epg_auto_update_index = self.epg_auto_update.to_index();
         self.config.epg_time_offset = self.epg_time_offset;
         self.config.epg_show_actual_time = self.epg_show_actual_time;
+        self.config.epg_load_on_startup = self.epg_load_on_startup;
         
         // Save favorites
         self.config.favorites_json = serde_json::to_string(&self.favorites).unwrap_or_default();
@@ -2336,7 +2340,7 @@ impl eframe::App for IPTVApp {
                         save_playlist_entries(&self.playlist_entries);
                     }
                     
-                    // Load EPG cache from disk if available
+                    // Load EPG cache from disk if available, or fetch fresh if load_on_startup enabled
                     if !self.epg_url_input.is_empty() && self.epg_data.is_none() {
                         // Try to load cached EPG data
                         if let Some(cached_epg) = load_epg_cache::<EpgData>(&self.server, &self.username) {
@@ -2367,6 +2371,10 @@ impl eframe::App for IPTVApp {
                                     // Trigger refresh - the periodic check will handle it
                                 }
                             }
+                        } else if self.epg_load_on_startup {
+                            // No cache found but load on startup is enabled - fetch fresh
+                            self.log("[INFO] No EPG cache found, loading fresh (startup enabled)");
+                            self.load_epg();
                         } else {
                             self.log("[INFO] No EPG cache found - use EPG button to load");
                         }
@@ -3782,7 +3790,7 @@ impl eframe::App for IPTVApp {
                         }
                     });
                     
-                    // Auto-update dropdown
+                    // Auto-update dropdown and load on startup
                     ui.horizontal(|ui| {
                         ui.label("Auto-update:");
                         egui::ComboBox::from_id_salt("epg_auto_update")
@@ -3797,6 +3805,9 @@ impl eframe::App for IPTVApp {
                                 ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Days4, "4 Days");
                                 ui.selectable_value(&mut self.epg_auto_update, EpgAutoUpdate::Days5, "5 Days");
                             });
+                        
+                        ui.checkbox(&mut self.epg_load_on_startup, "Load on startup")
+                            .on_hover_text("Automatically load EPG when logging in");
                         
                         // Show last update time
                         if let Some(last) = self.epg_last_update {
